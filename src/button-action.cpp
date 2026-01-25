@@ -124,13 +124,13 @@ void FrontendAction::execute()
 			obs_frontend_start_virtualcam();
 		break;
 	case FrontendActionType::EnableStudioMode:
-		obs_frontend_set_studio_mode_enabled(true);
+		obs_frontend_set_preview_program_mode(true);
 		break;
 	case FrontendActionType::DisableStudioMode:
-		obs_frontend_set_studio_mode_enabled(false);
+		obs_frontend_set_preview_program_mode(false);
 		break;
 	case FrontendActionType::ToggleStudioMode:
-		obs_frontend_set_studio_mode_enabled(!obs_frontend_preview_program_mode_active());
+		obs_frontend_set_preview_program_mode(!obs_frontend_preview_program_mode_active());
 		break;
 	case FrontendActionType::TransitionToProgram:
 		obs_frontend_preview_program_trigger_transition();
