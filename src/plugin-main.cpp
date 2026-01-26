@@ -70,7 +70,7 @@ void obs_module_unload(void)
 
 const char *obs_module_name(void)
 {
-	return "OBS Omni Bar";
+	return "Omni Bar";
 }
 
 const char *obs_module_description(void)

@@ -25,8 +25,63 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QAction>
 #include <QFile>
 #include <QDir>
+#include <QApplication>
+#include <QPalette>
 
 OmniBar *OmniBar::instance = nullptr;
+
+// Helper function to detect if OBS is in dark mode
+static bool isDarkTheme()
+{
+	// Check the application palette - if the window color is dark, assume dark theme
+	QPalette palette = QApplication::palette();
+	QColor windowColor = palette.color(QPalette::Window);
+	// If the luminance is below 128, it's a dark theme
+	int luminance = (windowColor.red() * 299 + windowColor.green() * 587 + windowColor.blue() * 114) / 1000;
+	return luminance < 128;
+}
+
+// Helper to get themed icon path
+static QString getThemedIconPath(const QString &basePath)
+{
+	if (basePath.isEmpty())
+		return QString();
+
+	// Check if already has a theme suffix
+	if (basePath.contains("_dark.") || basePath.contains("_light."))
+		return basePath;
+
+	// Try to find themed version
+	QString suffix = isDarkTheme() ? "_dark" : "_light";
+	int dotIndex = basePath.lastIndexOf('.');
+	if (dotIndex > 0) {
+		QString themedPath = basePath.left(dotIndex) + suffix + basePath.mid(dotIndex);
+
+		// Check if themed version exists in plugin data
+		char *dataPath = obs_module_file(themedPath.toUtf8().constData());
+		if (dataPath) {
+			QString fullPath = QString::fromUtf8(dataPath);
+			bfree(dataPath);
+			if (QFile::exists(fullPath)) {
+				return themedPath;
+			}
+		}
+
+		// Try with icons/ prefix
+		QString iconsPath = QString("icons/%1").arg(themedPath);
+		dataPath = obs_module_file(iconsPath.toUtf8().constData());
+		if (dataPath) {
+			QString fullPath = QString::fromUtf8(dataPath);
+			bfree(dataPath);
+			if (QFile::exists(fullPath)) {
+				return iconsPath;
+			}
+		}
+	}
+
+	// Return original if no themed version found
+	return basePath;
+}
 
 // OmniBarButton implementation
 OmniBarButton::OmniBarButton(std::shared_ptr<ButtonConfig> config, QWidget *parent)
@@ -94,7 +149,16 @@ OmniBar::~OmniBar()
 	instance = nullptr;
 }
 
-void OmniBar::attachToMainWindow(QMainWindow *mainWindow)
+void OmniBar::attachToMainWindow(QMainWindow *window)
+{
+	if (!window)
+		return;
+
+	mainWindow = window;
+	repositionToolbar();
+}
+
+void OmniBar::repositionToolbar()
 {
 	if (!mainWindow)
 		return;
@@ -117,7 +181,10 @@ void OmniBar::attachToMainWindow(QMainWindow *mainWindow)
 		area = Qt::TopToolBarArea;
 	}
 
+	// Remove from current position and add to new position
+	mainWindow->removeToolBar(this);
 	mainWindow->addToolBar(area, this);
+	show();
 
 	// Set orientation based on position
 	if (area == Qt::LeftToolBarArea || area == Qt::RightToolBarArea) {
@@ -217,10 +284,13 @@ QIcon OmniBar::getIconForButton(const std::shared_ptr<ButtonConfig> &config)
 
 	QString iconPath = config->iconPath;
 
+	// Try to get themed version of the icon
+	QString themedPath = getThemedIconPath(iconPath);
+
 	// Check if it's a built-in icon
-	if (!iconPath.contains('/') && !iconPath.contains('\\')) {
+	if (!themedPath.contains('/') && !themedPath.contains('\\')) {
 		// Try to load from plugin data directory
-		char *dataPath = obs_module_file(iconPath.toUtf8().constData());
+		char *dataPath = obs_module_file(themedPath.toUtf8().constData());
 		if (dataPath) {
 			QString fullPath = QString::fromUtf8(dataPath);
 			bfree(dataPath);
@@ -230,7 +300,18 @@ QIcon OmniBar::getIconForButton(const std::shared_ptr<ButtonConfig> &config)
 		}
 
 		// Try icons subdirectory
-		QString iconsPath = QString("icons/%1").arg(iconPath);
+		QString iconsPath = QString("icons/%1").arg(themedPath);
+		dataPath = obs_module_file(iconsPath.toUtf8().constData());
+		if (dataPath) {
+			QString fullPath = QString::fromUtf8(dataPath);
+			bfree(dataPath);
+			if (QFile::exists(fullPath)) {
+				return QIcon(fullPath);
+			}
+		}
+
+		// Fallback to non-themed version
+		iconsPath = QString("icons/%1").arg(iconPath);
 		dataPath = obs_module_file(iconsPath.toUtf8().constData());
 		if (dataPath) {
 			QString fullPath = QString::fromUtf8(dataPath);
@@ -257,49 +338,49 @@ QIcon OmniBar::getIconForButton(const std::shared_ptr<ButtonConfig> &config)
 				case FrontendActionType::ToggleStreaming:
 				case FrontendActionType::StartStreaming:
 				case FrontendActionType::StopStreaming:
-					defaultIcon = "icons/stream.svg";
+					defaultIcon = isDarkTheme() ? "icons/stream_dark.svg" : "icons/stream_light.svg";
 					break;
 				case FrontendActionType::ToggleRecording:
 				case FrontendActionType::StartRecording:
 				case FrontendActionType::StopRecording:
-					defaultIcon = "icons/record.svg";
+					defaultIcon = isDarkTheme() ? "icons/record_dark.svg" : "icons/record_light.svg";
 					break;
 				case FrontendActionType::TogglePauseRecording:
 				case FrontendActionType::PauseRecording:
 				case FrontendActionType::UnpauseRecording:
-					defaultIcon = "icons/pause.svg";
+					defaultIcon = isDarkTheme() ? "icons/pause_dark.svg" : "icons/pause_light.svg";
 					break;
 				case FrontendActionType::ToggleReplayBuffer:
 				case FrontendActionType::StartReplayBuffer:
 				case FrontendActionType::StopReplayBuffer:
-					defaultIcon = "icons/replay.svg";
+					defaultIcon = isDarkTheme() ? "icons/replay_dark.svg" : "icons/replay_light.svg";
 					break;
 				case FrontendActionType::SaveReplayBuffer:
-					defaultIcon = "icons/save-replay.svg";
+					defaultIcon = isDarkTheme() ? "icons/save-replay_dark.svg" : "icons/save-replay_light.svg";
 					break;
 				case FrontendActionType::ToggleVirtualCam:
 				case FrontendActionType::StartVirtualCam:
 				case FrontendActionType::StopVirtualCam:
-					defaultIcon = "icons/virtual-cam.svg";
+					defaultIcon = isDarkTheme() ? "icons/virtual-cam_dark.svg" : "icons/virtual-cam_light.svg";
 					break;
 				case FrontendActionType::ToggleStudioMode:
 				case FrontendActionType::EnableStudioMode:
 				case FrontendActionType::DisableStudioMode:
 				case FrontendActionType::TransitionToProgram:
-					defaultIcon = "icons/studio-mode.svg";
+					defaultIcon = isDarkTheme() ? "icons/studio-mode_dark.svg" : "icons/studio-mode_light.svg";
 					break;
 				}
 			}
 			break;
 		}
 		case ActionType::SourceFilter:
-			defaultIcon = "icons/filter.svg";
+			defaultIcon = isDarkTheme() ? "icons/filter_dark.svg" : "icons/filter_light.svg";
 			break;
 		case ActionType::SourceVisibility:
-			defaultIcon = "icons/visibility.svg";
+			defaultIcon = isDarkTheme() ? "icons/visibility_dark.svg" : "icons/visibility_light.svg";
 			break;
 		case ActionType::SourceHotkey:
-			defaultIcon = "icons/hotkey.svg";
+			defaultIcon = isDarkTheme() ? "icons/hotkey_dark.svg" : "icons/hotkey_light.svg";
 			break;
 		default:
 			break;
@@ -356,6 +437,7 @@ void OmniBar::onUpdateTimer()
 
 void OmniBar::refreshFromConfiguration()
 {
+	repositionToolbar();
 	rebuildToolbar();
 }
 

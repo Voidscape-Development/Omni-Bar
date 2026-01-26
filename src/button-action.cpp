@@ -281,7 +281,8 @@ FrontendActionType FrontendAction::getFrontendActionFromName(const QString &name
 
 // SourceHotkeyAction implementation
 SourceHotkeyAction::SourceHotkeyAction(const QString &source, const QString &hotkey)
-	: sourceName(source), hotkeyName(hotkey)
+	: sourceName(source),
+	  hotkeyName(hotkey)
 {
 }
 
@@ -346,7 +347,8 @@ obs_data_t *SourceHotkeyAction::serialize() const
 
 // SourceFilterAction implementation
 SourceFilterAction::SourceFilterAction(const QString &source, const QString &filter)
-	: sourceName(source), filterName(filter)
+	: sourceName(source),
+	  filterName(filter)
 {
 }
 
@@ -411,7 +413,8 @@ obs_data_t *SourceFilterAction::serialize() const
 
 // SourceVisibilityAction implementation
 SourceVisibilityAction::SourceVisibilityAction(const QString &scene, const QString &source)
-	: sceneName(scene), sourceName(source)
+	: sceneName(scene),
+	  sourceName(source)
 {
 }
 

@@ -30,85 +30,79 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QMessageBox>
+#include <QApplication>
+#include <QPalette>
+#include <QFile>
 
-OmniBarConfig *OmniBarConfig::instance = nullptr;
-
-OmniBarConfig::OmniBarConfig(QWidget *parent) : QDialog(parent)
+// Helper function to check if dark theme is active
+static bool isDarkTheme()
 {
-	setWindowTitle(obs_module_text("OmniBar.Settings.Title"));
-	setMinimumSize(700, 500);
-	setupUI();
-	loadSettings();
+	QPalette palette = QApplication::palette();
+	QColor windowColor = palette.color(QPalette::Window);
+	int luminance = (windowColor.red() * 299 + windowColor.green() * 587 + windowColor.blue() * 114) / 1000;
+	return luminance < 128;
 }
 
-OmniBarConfig::~OmniBarConfig()
+// Helper function to get themed icon path
+static QString getThemedIconPath(const QString &basePath)
 {
-	if (instance == this)
-		instance = nullptr;
-}
+	if (basePath.isEmpty() || basePath == "custom")
+		return QString();
 
-void OmniBarConfig::showDialog()
-{
-	if (!instance) {
-		QWidget *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
-		instance = new OmniBarConfig(mainWindow);
-		instance->setAttribute(Qt::WA_DeleteOnClose);
+	QString suffix = isDarkTheme() ? "_dark" : "_light";
+
+	// Try themed variant first
+	int dotIndex = basePath.lastIndexOf('.');
+	if (dotIndex > 0) {
+		QString themedPath = basePath.left(dotIndex) + suffix + basePath.mid(dotIndex);
+		char *fullPath = obs_module_file(themedPath.toUtf8().constData());
+		if (fullPath) {
+			QString result = QString::fromUtf8(fullPath);
+			bfree(fullPath);
+			return result;
+		}
 	}
-	instance->show();
-	instance->raise();
-	instance->activateWindow();
+
+	// Fall back to base path
+	char *fullPath = obs_module_file(("icons/" + basePath).toUtf8().constData());
+	if (fullPath) {
+		QString result = QString::fromUtf8(fullPath);
+		bfree(fullPath);
+		return result;
+	}
+
+	return QString();
 }
 
-void OmniBarConfig::setupUI()
+// ============================================================================
+// ButtonEditDialog Implementation
+// ============================================================================
+
+ButtonEditDialog::ButtonEditDialog(std::shared_ptr<ButtonConfig> config, QWidget *parent)
+	: QDialog(parent), buttonConfig(config)
+{
+	setWindowTitle(obs_module_text("OmniBar.Settings.EditButton"));
+	setMinimumSize(450, 400);
+	setupUI();
+	populateSources();
+	populateScenes();
+	populateHotkeys();
+	populateFromConfig();
+}
+
+ButtonEditDialog::~ButtonEditDialog() {}
+
+void ButtonEditDialog::setupUI()
 {
 	QVBoxLayout *mainLayout = new QVBoxLayout(this);
 
-	// Main content area with button list and editor
-	QHBoxLayout *contentLayout = new QHBoxLayout();
+	QFormLayout *formLayout = new QFormLayout();
 
-	// Left panel - Button list
-	QGroupBox *listGroup = new QGroupBox(obs_module_text("OmniBar.Settings.Buttons"));
-	QVBoxLayout *listLayout = new QVBoxLayout(listGroup);
-
-	buttonList = new QListWidget();
-	buttonList->setSelectionMode(QAbstractItemView::SingleSelection);
-	connect(buttonList, &QListWidget::currentRowChanged, this, &OmniBarConfig::onButtonSelected);
-	connect(buttonList, &QListWidget::itemDoubleClicked, this, &OmniBarConfig::onButtonDoubleClicked);
-	listLayout->addWidget(buttonList);
-
-	QHBoxLayout *listButtonLayout = new QHBoxLayout();
-	addButton = new QPushButton(obs_module_text("OmniBar.Settings.AddButton"));
-	removeButton = new QPushButton(obs_module_text("OmniBar.Settings.RemoveButton"));
-	editButton = new QPushButton(obs_module_text("OmniBar.Settings.EditButton"));
-	moveUpButton = new QPushButton(obs_module_text("OmniBar.Settings.MoveUp"));
-	moveDownButton = new QPushButton(obs_module_text("OmniBar.Settings.MoveDown"));
-
-	connect(addButton, &QPushButton::clicked, this, &OmniBarConfig::onAddButton);
-	connect(removeButton, &QPushButton::clicked, this, &OmniBarConfig::onRemoveButton);
-	connect(editButton, &QPushButton::clicked, this, &OmniBarConfig::onEditButton);
-	connect(moveUpButton, &QPushButton::clicked, this, &OmniBarConfig::onMoveUp);
-	connect(moveDownButton, &QPushButton::clicked, this, &OmniBarConfig::onMoveDown);
-
-	listButtonLayout->addWidget(addButton);
-	listButtonLayout->addWidget(removeButton);
-	listButtonLayout->addWidget(editButton);
-	listButtonLayout->addWidget(moveUpButton);
-	listButtonLayout->addWidget(moveDownButton);
-	listLayout->addLayout(listButtonLayout);
-
-	contentLayout->addWidget(listGroup, 1);
-
-	// Right panel - Button editor
-	QGroupBox *editorGroup = new QGroupBox(obs_module_text("OmniBar.Settings.ButtonEditor"));
-	QVBoxLayout *editorLayout = new QVBoxLayout(editorGroup);
-
-	editorWidget = new QWidget();
-	QFormLayout *editorForm = new QFormLayout(editorWidget);
-
-	// Common settings
+	// Tooltip
 	tooltipEdit = new QLineEdit();
-	editorForm->addRow(obs_module_text("OmniBar.Settings.Tooltip"), tooltipEdit);
+	formLayout->addRow(obs_module_text("OmniBar.Settings.Tooltip"), tooltipEdit);
 
+	// Icon selection
 	QHBoxLayout *iconLayout = new QHBoxLayout();
 	iconCombo = new QComboBox();
 	iconCombo->addItem(obs_module_text("OmniBar.Icon.Stream"), "stream.svg");
@@ -122,12 +116,21 @@ void OmniBarConfig::setupUI()
 	iconCombo->addItem(obs_module_text("OmniBar.Icon.Filter"), "filter.svg");
 	iconCombo->addItem(obs_module_text("OmniBar.Icon.Hotkey"), "hotkey.svg");
 	iconCombo->addItem(obs_module_text("OmniBar.Icon.Custom"), "custom");
+	connect(iconCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &ButtonEditDialog::onIconChanged);
 	iconLayout->addWidget(iconCombo, 1);
+
 	iconBrowseButton = new QPushButton("...");
 	iconBrowseButton->setFixedWidth(30);
-	connect(iconBrowseButton, &QPushButton::clicked, this, &OmniBarConfig::onIconBrowse);
+	connect(iconBrowseButton, &QPushButton::clicked, this, &ButtonEditDialog::onIconBrowse);
 	iconLayout->addWidget(iconBrowseButton);
-	editorForm->addRow(obs_module_text("OmniBar.Settings.Icon"), iconLayout);
+
+	iconPreview = new QLabel();
+	iconPreview->setFixedSize(32, 32);
+	iconPreview->setScaledContents(true);
+	iconPreview->setStyleSheet("QLabel { border: 1px solid #555; background-color: #2a2a2a; }");
+	iconLayout->addWidget(iconPreview);
+
+	formLayout->addRow(obs_module_text("OmniBar.Settings.Icon"), iconLayout);
 
 	// Action type
 	actionTypeCombo = new QComboBox();
@@ -136,10 +139,12 @@ void OmniBarConfig::setupUI()
 	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.SourceFilter"), static_cast<int>(ActionType::SourceFilter));
 	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.SourceVisibility"), static_cast<int>(ActionType::SourceVisibility));
 	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.Spacer"), static_cast<int>(ActionType::Spacer));
-	connect(actionTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &OmniBarConfig::onActionTypeChanged);
-	editorForm->addRow(obs_module_text("OmniBar.Settings.ActionType"), actionTypeCombo);
+	connect(actionTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &ButtonEditDialog::onActionTypeChanged);
+	formLayout->addRow(obs_module_text("OmniBar.Settings.ActionType"), actionTypeCombo);
 
-	// Action-specific editors
+	mainLayout->addLayout(formLayout);
+
+	// Action-specific settings
 	actionStack = new QStackedWidget();
 
 	// Frontend action page
@@ -183,7 +188,7 @@ void OmniBarConfig::setupUI()
 	QFormLayout *filterForm = new QFormLayout(filterPage);
 	filterSourceCombo = new QComboBox();
 	filterCombo = new QComboBox();
-	connect(filterSourceCombo, &QComboBox::currentTextChanged, this, &OmniBarConfig::populateFilters);
+	connect(filterSourceCombo, &QComboBox::currentTextChanged, this, &ButtonEditDialog::onSourceChanged);
 	filterForm->addRow(obs_module_text("OmniBar.Settings.Source"), filterSourceCombo);
 	filterForm->addRow(obs_module_text("OmniBar.Settings.Filter"), filterCombo);
 	actionStack->addWidget(filterPage);
@@ -193,7 +198,7 @@ void OmniBarConfig::setupUI()
 	QFormLayout *visibilityForm = new QFormLayout(visibilityPage);
 	visibilitySceneCombo = new QComboBox();
 	visibilitySourceCombo = new QComboBox();
-	connect(visibilitySceneCombo, &QComboBox::currentTextChanged, this, &OmniBarConfig::populateSceneItems);
+	connect(visibilitySceneCombo, &QComboBox::currentTextChanged, this, &ButtonEditDialog::onSceneChanged);
 	visibilityForm->addRow(obs_module_text("OmniBar.Settings.Scene"), visibilitySceneCombo);
 	visibilityForm->addRow(obs_module_text("OmniBar.Settings.Source"), visibilitySourceCombo);
 	actionStack->addWidget(visibilityPage);
@@ -207,21 +212,400 @@ void OmniBarConfig::setupUI()
 	spacerForm->addRow(obs_module_text("OmniBar.Settings.SpacerWidth"), spacerWidthSpin);
 	actionStack->addWidget(spacerPage);
 
-	editorForm->addRow(actionStack);
+	mainLayout->addWidget(actionStack);
 
-	// Expandable settings
+	// Expandable options
+	QGroupBox *expandGroup = new QGroupBox(obs_module_text("OmniBar.Settings.ExpandableGroup"));
+	QVBoxLayout *expandLayout = new QVBoxLayout(expandGroup);
 	expandableCheck = new QCheckBox(obs_module_text("OmniBar.Settings.Expandable"));
 	expandWhenActiveCheck = new QCheckBox(obs_module_text("OmniBar.Settings.ExpandWhenActive"));
-	editorForm->addRow(expandableCheck);
-	editorForm->addRow(expandWhenActiveCheck);
+	expandLayout->addWidget(expandableCheck);
+	expandLayout->addWidget(expandWhenActiveCheck);
+	mainLayout->addWidget(expandGroup);
 
-	editorLayout->addWidget(editorWidget);
-	editorWidget->setEnabled(false);
+	mainLayout->addStretch();
 
-	contentLayout->addWidget(editorGroup, 1);
-	mainLayout->addLayout(contentLayout);
+	// Dialog buttons
+	QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+	connect(buttonBox, &QDialogButtonBox::accepted, this, &ButtonEditDialog::onOk);
+	connect(buttonBox, &QDialogButtonBox::rejected, this, &ButtonEditDialog::onCancel);
+	mainLayout->addWidget(buttonBox);
+}
 
-	// Dock settings
+void ButtonEditDialog::populateFromConfig()
+{
+	if (!buttonConfig)
+		return;
+
+	tooltipEdit->setText(buttonConfig->tooltip);
+	expandableCheck->setChecked(buttonConfig->expandable);
+	expandWhenActiveCheck->setChecked(buttonConfig->expandWhenActive);
+
+	// Icon
+	customIconPath = buttonConfig->iconPath;
+	int iconIndex = iconCombo->findData(buttonConfig->iconPath);
+	if (iconIndex >= 0) {
+		iconCombo->setCurrentIndex(iconIndex);
+	} else {
+		iconCombo->setCurrentIndex(iconCombo->count() - 1); // Custom
+	}
+	updateIconPreview();
+
+	if (!buttonConfig->action)
+		return;
+
+	ActionType type = buttonConfig->action->getType();
+	int typeIndex = actionTypeCombo->findData(static_cast<int>(type));
+	if (typeIndex >= 0) {
+		actionTypeCombo->setCurrentIndex(typeIndex);
+		actionStack->setCurrentIndex(typeIndex);
+	}
+
+	switch (type) {
+	case ActionType::Frontend: {
+		auto *frontendAction = dynamic_cast<FrontendAction *>(buttonConfig->action.get());
+		if (frontendAction) {
+			QString actionName = FrontendAction::getFrontendActionName(frontendAction->getActionType());
+			int actionIndex = frontendActionCombo->findData(actionName);
+			if (actionIndex >= 0) {
+				frontendActionCombo->setCurrentIndex(actionIndex);
+			}
+		}
+		break;
+	}
+	case ActionType::SourceHotkey: {
+		auto *hotkeyAction = dynamic_cast<SourceHotkeyAction *>(buttonConfig->action.get());
+		if (hotkeyAction) {
+			int sourceIndex = hotkeySourceCombo->findText(hotkeyAction->getSourceName());
+			if (sourceIndex >= 0)
+				hotkeySourceCombo->setCurrentIndex(sourceIndex);
+			int hotkeyIndex = hotkeyCombo->findText(hotkeyAction->getHotkeyName());
+			if (hotkeyIndex >= 0)
+				hotkeyCombo->setCurrentIndex(hotkeyIndex);
+		}
+		break;
+	}
+	case ActionType::SourceFilter: {
+		auto *filterAction = dynamic_cast<SourceFilterAction *>(buttonConfig->action.get());
+		if (filterAction) {
+			int sourceIndex = filterSourceCombo->findText(filterAction->getSourceName());
+			if (sourceIndex >= 0) {
+				filterSourceCombo->setCurrentIndex(sourceIndex);
+				populateFilters(filterAction->getSourceName());
+			}
+			int filterIndex = filterCombo->findText(filterAction->getFilterName());
+			if (filterIndex >= 0)
+				filterCombo->setCurrentIndex(filterIndex);
+		}
+		break;
+	}
+	case ActionType::SourceVisibility: {
+		auto *visAction = dynamic_cast<SourceVisibilityAction *>(buttonConfig->action.get());
+		if (visAction) {
+			int sceneIndex = visibilitySceneCombo->findText(visAction->getSceneName());
+			if (sceneIndex >= 0) {
+				visibilitySceneCombo->setCurrentIndex(sceneIndex);
+				populateSceneItems(visAction->getSceneName());
+			}
+			int sourceIndex = visibilitySourceCombo->findText(visAction->getSourceName());
+			if (sourceIndex >= 0)
+				visibilitySourceCombo->setCurrentIndex(sourceIndex);
+		}
+		break;
+	}
+	case ActionType::Spacer: {
+		auto *spacerAction = dynamic_cast<SpacerAction *>(buttonConfig->action.get());
+		if (spacerAction) {
+			spacerWidthSpin->setValue(spacerAction->getWidth());
+		}
+		break;
+	}
+	}
+}
+
+void ButtonEditDialog::updateConfigFromUI()
+{
+	buttonConfig->tooltip = tooltipEdit->text();
+	buttonConfig->expandable = expandableCheck->isChecked();
+	buttonConfig->expandWhenActive = expandWhenActiveCheck->isChecked();
+
+	// Icon
+	if (iconCombo->currentData().toString() != "custom") {
+		buttonConfig->iconPath = iconCombo->currentData().toString();
+	} else {
+		buttonConfig->iconPath = customIconPath;
+	}
+
+	// Action
+	ActionType type = static_cast<ActionType>(actionTypeCombo->currentData().toInt());
+	switch (type) {
+	case ActionType::Frontend: {
+		QString actionName = frontendActionCombo->currentData().toString();
+		FrontendActionType actionType = FrontendAction::getFrontendActionFromName(actionName);
+		buttonConfig->action = std::make_unique<FrontendAction>(actionType);
+		break;
+	}
+	case ActionType::SourceHotkey: {
+		buttonConfig->action = std::make_unique<SourceHotkeyAction>(hotkeySourceCombo->currentText(), hotkeyCombo->currentText());
+		break;
+	}
+	case ActionType::SourceFilter: {
+		buttonConfig->action = std::make_unique<SourceFilterAction>(filterSourceCombo->currentText(), filterCombo->currentText());
+		break;
+	}
+	case ActionType::SourceVisibility: {
+		buttonConfig->action = std::make_unique<SourceVisibilityAction>(visibilitySceneCombo->currentText(), visibilitySourceCombo->currentText());
+		break;
+	}
+	case ActionType::Spacer: {
+		buttonConfig->action = std::make_unique<SpacerAction>(spacerWidthSpin->value());
+		break;
+	}
+	}
+}
+
+void ButtonEditDialog::onActionTypeChanged(int index)
+{
+	actionStack->setCurrentIndex(index);
+}
+
+void ButtonEditDialog::onIconChanged(int index)
+{
+	Q_UNUSED(index);
+	updateIconPreview();
+}
+
+void ButtonEditDialog::updateIconPreview()
+{
+	QString iconPath;
+	QString iconData = iconCombo->currentData().toString();
+
+	if (iconData == "custom") {
+		// Use custom icon path
+		iconPath = customIconPath;
+	} else {
+		// Get themed icon path for built-in icons
+		iconPath = getThemedIconPath("icons/" + iconData);
+	}
+
+	if (!iconPath.isEmpty() && QFile::exists(iconPath)) {
+		QPixmap pixmap(iconPath);
+		if (!pixmap.isNull()) {
+			iconPreview->setPixmap(pixmap.scaled(32, 32, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+		} else {
+			iconPreview->clear();
+		}
+	} else {
+		iconPreview->clear();
+	}
+}
+
+void ButtonEditDialog::onIconBrowse()
+{
+	QString file = QFileDialog::getOpenFileName(this, obs_module_text("OmniBar.Settings.SelectIcon"), QString(),
+						    "Images (*.png *.svg *.ico *.jpg *.jpeg);;All files (*.*)");
+	if (!file.isEmpty()) {
+		customIconPath = file;
+		iconCombo->setCurrentIndex(iconCombo->count() - 1); // Custom
+		updateIconPreview();
+	}
+}
+
+void ButtonEditDialog::onSourceChanged(const QString &sourceName)
+{
+	populateFilters(sourceName);
+}
+
+void ButtonEditDialog::onSceneChanged(const QString &sceneName)
+{
+	populateSceneItems(sceneName);
+}
+
+void ButtonEditDialog::onOk()
+{
+	updateConfigFromUI();
+	accept();
+}
+
+void ButtonEditDialog::onCancel()
+{
+	reject();
+}
+
+void ButtonEditDialog::populateSources()
+{
+	hotkeySourceCombo->clear();
+	filterSourceCombo->clear();
+
+	obs_enum_sources(
+		[](void *data, obs_source_t *source) {
+			ButtonEditDialog *dialog = static_cast<ButtonEditDialog *>(data);
+			const char *name = obs_source_get_name(source);
+			if (name) {
+				dialog->hotkeySourceCombo->addItem(QString::fromUtf8(name));
+				dialog->filterSourceCombo->addItem(QString::fromUtf8(name));
+			}
+			return true;
+		},
+		this);
+}
+
+void ButtonEditDialog::populateScenes()
+{
+	visibilitySceneCombo->clear();
+
+	struct obs_frontend_source_list scenes = {};
+	obs_frontend_get_scenes(&scenes);
+	for (size_t i = 0; i < scenes.sources.num; i++) {
+		const char *name = obs_source_get_name(scenes.sources.array[i]);
+		if (name) {
+			visibilitySceneCombo->addItem(QString::fromUtf8(name));
+		}
+	}
+	obs_frontend_source_list_free(&scenes);
+}
+
+void ButtonEditDialog::populateFilters(const QString &sourceName)
+{
+	filterCombo->clear();
+	if (sourceName.isEmpty())
+		return;
+
+	obs_source_t *source = obs_get_source_by_name(sourceName.toUtf8().constData());
+	if (!source)
+		return;
+
+	obs_source_enum_filters(
+		source,
+		[](obs_source_t *, obs_source_t *filter, void *data) {
+			QComboBox *combo = static_cast<QComboBox *>(data);
+			const char *name = obs_source_get_name(filter);
+			if (name) {
+				combo->addItem(QString::fromUtf8(name));
+			}
+		},
+		filterCombo);
+
+	obs_source_release(source);
+}
+
+void ButtonEditDialog::populateSceneItems(const QString &sceneName)
+{
+	visibilitySourceCombo->clear();
+	if (sceneName.isEmpty())
+		return;
+
+	obs_source_t *sceneSource = obs_get_source_by_name(sceneName.toUtf8().constData());
+	if (!sceneSource)
+		return;
+
+	obs_scene_t *scene = obs_scene_from_source(sceneSource);
+	if (!scene) {
+		obs_source_release(sceneSource);
+		return;
+	}
+
+	obs_scene_enum_items(
+		scene,
+		[](obs_scene_t *, obs_sceneitem_t *item, void *data) {
+			QComboBox *combo = static_cast<QComboBox *>(data);
+			obs_source_t *source = obs_sceneitem_get_source(item);
+			const char *name = obs_source_get_name(source);
+			if (name) {
+				combo->addItem(QString::fromUtf8(name));
+			}
+			return true;
+		},
+		visibilitySourceCombo);
+
+	obs_source_release(sceneSource);
+}
+
+void ButtonEditDialog::populateHotkeys()
+{
+	hotkeyCombo->clear();
+
+	obs_enum_hotkeys(
+		[](void *data, obs_hotkey_id id, obs_hotkey_t *key) {
+			Q_UNUSED(id);
+			QComboBox *combo = static_cast<QComboBox *>(data);
+			const char *name = obs_hotkey_get_name(key);
+			if (name) {
+				combo->addItem(QString::fromUtf8(name));
+			}
+			return true;
+		},
+		hotkeyCombo);
+}
+
+// ============================================================================
+// OmniBarConfig Implementation
+// ============================================================================
+
+OmniBarConfig *OmniBarConfig::instance = nullptr;
+
+OmniBarConfig::OmniBarConfig(QWidget *parent) : QDialog(parent)
+{
+	setWindowTitle(obs_module_text("OmniBar.Settings.Title"));
+	setMinimumSize(500, 400);
+	setupUI();
+	loadSettings();
+}
+
+OmniBarConfig::~OmniBarConfig()
+{
+	if (instance == this)
+		instance = nullptr;
+}
+
+void OmniBarConfig::showDialog()
+{
+	if (!instance) {
+		QWidget *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+		instance = new OmniBarConfig(mainWindow);
+		instance->setAttribute(Qt::WA_DeleteOnClose);
+	}
+	instance->show();
+	instance->raise();
+	instance->activateWindow();
+}
+
+void OmniBarConfig::setupUI()
+{
+	QVBoxLayout *mainLayout = new QVBoxLayout(this);
+
+	// Button list section
+	QGroupBox *listGroup = new QGroupBox(obs_module_text("OmniBar.Settings.Buttons"));
+	QVBoxLayout *listLayout = new QVBoxLayout(listGroup);
+
+	buttonList = new QListWidget();
+	buttonList->setSelectionMode(QAbstractItemView::SingleSelection);
+	connect(buttonList, &QListWidget::itemDoubleClicked, this, &OmniBarConfig::onButtonDoubleClicked);
+	listLayout->addWidget(buttonList);
+
+	QHBoxLayout *listButtonLayout = new QHBoxLayout();
+	addButton = new QPushButton(obs_module_text("OmniBar.Settings.AddButton"));
+	removeButton = new QPushButton(obs_module_text("OmniBar.Settings.RemoveButton"));
+	editButton = new QPushButton(obs_module_text("OmniBar.Settings.EditButton"));
+	moveUpButton = new QPushButton(obs_module_text("OmniBar.Settings.MoveUp"));
+	moveDownButton = new QPushButton(obs_module_text("OmniBar.Settings.MoveDown"));
+
+	connect(addButton, &QPushButton::clicked, this, &OmniBarConfig::onAddButton);
+	connect(removeButton, &QPushButton::clicked, this, &OmniBarConfig::onRemoveButton);
+	connect(editButton, &QPushButton::clicked, this, &OmniBarConfig::onEditButton);
+	connect(moveUpButton, &QPushButton::clicked, this, &OmniBarConfig::onMoveUp);
+	connect(moveDownButton, &QPushButton::clicked, this, &OmniBarConfig::onMoveDown);
+
+	listButtonLayout->addWidget(addButton);
+	listButtonLayout->addWidget(removeButton);
+	listButtonLayout->addWidget(editButton);
+	listButtonLayout->addWidget(moveUpButton);
+	listButtonLayout->addWidget(moveDownButton);
+	listLayout->addLayout(listButtonLayout);
+
+	mainLayout->addWidget(listGroup);
+
+	// Dock settings section
 	QGroupBox *dockGroup = new QGroupBox(obs_module_text("OmniBar.Settings.DockSettings"));
 	QFormLayout *dockForm = new QFormLayout(dockGroup);
 
@@ -263,18 +647,10 @@ void OmniBarConfig::loadSettings()
 
 	iconSizeSpin->setValue(SettingsManager::getIconSize());
 	buttonPaddingSpin->setValue(SettingsManager::getButtonPadding());
-
-	populateSources();
-	populateScenes();
-	populateHotkeys();
 }
 
 void OmniBarConfig::saveSettings()
 {
-	if (isEditing && currentEditIndex >= 0) {
-		updateCurrentButtonFromEditor();
-	}
-
 	SettingsManager::setButtons(workingButtons);
 	SettingsManager::setDockPosition(static_cast<DockPosition>(dockPositionCombo->currentData().toInt()));
 	SettingsManager::setIconSize(iconSizeSpin->value());
@@ -308,14 +684,12 @@ void OmniBarConfig::onAddButton()
 	config->tooltip = obs_module_text("OmniBar.Action.ToggleStream");
 	config->iconPath = "stream.svg";
 
-	workingButtons.append(config);
-	populateButtonList();
-
-	buttonList->setCurrentRow(workingButtons.size() - 1);
-	isEditing = true;
-	currentEditIndex = workingButtons.size() - 1;
-	editorWidget->setEnabled(true);
-	populateActionEditor(config);
+	ButtonEditDialog dialog(config, this);
+	if (dialog.exec() == QDialog::Accepted) {
+		workingButtons.append(config);
+		populateButtonList();
+		buttonList->setCurrentRow(workingButtons.size() - 1);
+	}
 }
 
 void OmniBarConfig::onRemoveButton()
@@ -324,10 +698,6 @@ void OmniBarConfig::onRemoveButton()
 	if (row >= 0 && row < workingButtons.size()) {
 		workingButtons.removeAt(row);
 		populateButtonList();
-		clearActionEditor();
-		editorWidget->setEnabled(false);
-		isEditing = false;
-		currentEditIndex = -1;
 	}
 }
 
@@ -335,10 +705,11 @@ void OmniBarConfig::onEditButton()
 {
 	int row = buttonList->currentRow();
 	if (row >= 0 && row < workingButtons.size()) {
-		isEditing = true;
-		currentEditIndex = row;
-		editorWidget->setEnabled(true);
-		populateActionEditor(workingButtons[row]);
+		ButtonEditDialog dialog(workingButtons[row], this);
+		if (dialog.exec() == QDialog::Accepted) {
+			populateButtonList();
+			buttonList->setCurrentRow(row);
+		}
 	}
 }
 
@@ -362,279 +733,10 @@ void OmniBarConfig::onMoveDown()
 	}
 }
 
-void OmniBarConfig::onButtonSelected(int row)
-{
-	if (isEditing && currentEditIndex >= 0 && currentEditIndex != row) {
-		updateCurrentButtonFromEditor();
-	}
-
-	if (row >= 0 && row < workingButtons.size()) {
-		// Just show the button info, don't enable editing until Edit is clicked
-		if (!isEditing) {
-			editorWidget->setEnabled(false);
-		}
-	}
-}
-
 void OmniBarConfig::onButtonDoubleClicked(QListWidgetItem *item)
 {
 	Q_UNUSED(item);
 	onEditButton();
-}
-
-void OmniBarConfig::onActionTypeChanged(int index)
-{
-	actionStack->setCurrentIndex(index);
-}
-
-void OmniBarConfig::populateActionEditor(std::shared_ptr<ButtonConfig> config)
-{
-	if (!config)
-		return;
-
-	tooltipEdit->setText(config->tooltip);
-	expandableCheck->setChecked(config->expandable);
-	expandWhenActiveCheck->setChecked(config->expandWhenActive);
-
-	// Set icon
-	int iconIndex = iconCombo->findData(config->iconPath);
-	if (iconIndex >= 0) {
-		iconCombo->setCurrentIndex(iconIndex);
-	} else {
-		iconCombo->setCurrentIndex(iconCombo->count() - 1); // Custom
-	}
-
-	if (!config->action)
-		return;
-
-	ActionType type = config->action->getType();
-	int typeIndex = actionTypeCombo->findData(static_cast<int>(type));
-	if (typeIndex >= 0) {
-		actionTypeCombo->setCurrentIndex(typeIndex);
-	}
-
-	switch (type) {
-	case ActionType::Frontend: {
-		auto *frontendAction = dynamic_cast<FrontendAction *>(config->action.get());
-		if (frontendAction) {
-			QString actionName = FrontendAction::getFrontendActionName(frontendAction->getActionType());
-			int actionIndex = frontendActionCombo->findData(actionName);
-			if (actionIndex >= 0) {
-				frontendActionCombo->setCurrentIndex(actionIndex);
-			}
-		}
-		break;
-	}
-	case ActionType::SourceHotkey: {
-		auto *hotkeyAction = dynamic_cast<SourceHotkeyAction *>(config->action.get());
-		if (hotkeyAction) {
-			int sourceIndex = hotkeySourceCombo->findText(hotkeyAction->getSourceName());
-			if (sourceIndex >= 0)
-				hotkeySourceCombo->setCurrentIndex(sourceIndex);
-			int hotkeyIndex = hotkeyCombo->findText(hotkeyAction->getHotkeyName());
-			if (hotkeyIndex >= 0)
-				hotkeyCombo->setCurrentIndex(hotkeyIndex);
-		}
-		break;
-	}
-	case ActionType::SourceFilter: {
-		auto *filterAction = dynamic_cast<SourceFilterAction *>(config->action.get());
-		if (filterAction) {
-			int sourceIndex = filterSourceCombo->findText(filterAction->getSourceName());
-			if (sourceIndex >= 0) {
-				filterSourceCombo->setCurrentIndex(sourceIndex);
-				populateFilters(filterAction->getSourceName());
-			}
-			int filterIndex = filterCombo->findText(filterAction->getFilterName());
-			if (filterIndex >= 0)
-				filterCombo->setCurrentIndex(filterIndex);
-		}
-		break;
-	}
-	case ActionType::SourceVisibility: {
-		auto *visAction = dynamic_cast<SourceVisibilityAction *>(config->action.get());
-		if (visAction) {
-			int sceneIndex = visibilitySceneCombo->findText(visAction->getSceneName());
-			if (sceneIndex >= 0) {
-				visibilitySceneCombo->setCurrentIndex(sceneIndex);
-				populateSceneItems(visAction->getSceneName());
-			}
-			int sourceIndex = visibilitySourceCombo->findText(visAction->getSourceName());
-			if (sourceIndex >= 0)
-				visibilitySourceCombo->setCurrentIndex(sourceIndex);
-		}
-		break;
-	}
-	case ActionType::Spacer: {
-		auto *spacerAction = dynamic_cast<SpacerAction *>(config->action.get());
-		if (spacerAction) {
-			spacerWidthSpin->setValue(spacerAction->getWidth());
-		}
-		break;
-	}
-	}
-}
-
-void OmniBarConfig::clearActionEditor()
-{
-	tooltipEdit->clear();
-	iconCombo->setCurrentIndex(0);
-	actionTypeCombo->setCurrentIndex(0);
-	actionStack->setCurrentIndex(0);
-	expandableCheck->setChecked(false);
-	expandWhenActiveCheck->setChecked(false);
-}
-
-void OmniBarConfig::updateCurrentButtonFromEditor()
-{
-	if (currentEditIndex < 0 || currentEditIndex >= workingButtons.size())
-		return;
-
-	auto config = workingButtons[currentEditIndex];
-	config->tooltip = tooltipEdit->text();
-	config->expandable = expandableCheck->isChecked();
-	config->expandWhenActive = expandWhenActiveCheck->isChecked();
-
-	// Icon
-	if (iconCombo->currentData().toString() != "custom") {
-		config->iconPath = iconCombo->currentData().toString();
-	}
-
-	// Action
-	ActionType type = static_cast<ActionType>(actionTypeCombo->currentData().toInt());
-	switch (type) {
-	case ActionType::Frontend: {
-		QString actionName = frontendActionCombo->currentData().toString();
-		FrontendActionType actionType = FrontendAction::getFrontendActionFromName(actionName);
-		config->action = std::make_unique<FrontendAction>(actionType);
-		break;
-	}
-	case ActionType::SourceHotkey: {
-		config->action = std::make_unique<SourceHotkeyAction>(hotkeySourceCombo->currentText(), hotkeyCombo->currentText());
-		break;
-	}
-	case ActionType::SourceFilter: {
-		config->action = std::make_unique<SourceFilterAction>(filterSourceCombo->currentText(), filterCombo->currentText());
-		break;
-	}
-	case ActionType::SourceVisibility: {
-		config->action = std::make_unique<SourceVisibilityAction>(visibilitySceneCombo->currentText(), visibilitySourceCombo->currentText());
-		break;
-	}
-	case ActionType::Spacer: {
-		config->action = std::make_unique<SpacerAction>(spacerWidthSpin->value());
-		break;
-	}
-	}
-
-	populateButtonList();
-	buttonList->setCurrentRow(currentEditIndex);
-}
-
-void OmniBarConfig::populateSources()
-{
-	hotkeySourceCombo->clear();
-	filterSourceCombo->clear();
-
-	obs_enum_sources(
-		[](void *data, obs_source_t *source) {
-			OmniBarConfig *config = static_cast<OmniBarConfig *>(data);
-			const char *name = obs_source_get_name(source);
-			if (name) {
-				config->hotkeySourceCombo->addItem(QString::fromUtf8(name));
-				config->filterSourceCombo->addItem(QString::fromUtf8(name));
-			}
-			return true;
-		},
-		this);
-}
-
-void OmniBarConfig::populateScenes()
-{
-	visibilitySceneCombo->clear();
-
-	struct obs_frontend_source_list scenes = {};
-	obs_frontend_get_scenes(&scenes);
-	for (size_t i = 0; i < scenes.sources.num; i++) {
-		const char *name = obs_source_get_name(scenes.sources.array[i]);
-		if (name) {
-			visibilitySceneCombo->addItem(QString::fromUtf8(name));
-		}
-	}
-	obs_frontend_source_list_free(&scenes);
-}
-
-void OmniBarConfig::populateFilters(const QString &sourceName)
-{
-	filterCombo->clear();
-	if (sourceName.isEmpty())
-		return;
-
-	obs_source_t *source = obs_get_source_by_name(sourceName.toUtf8().constData());
-	if (!source)
-		return;
-
-	obs_source_enum_filters(
-		source,
-		[](obs_source_t *, obs_source_t *filter, void *data) {
-			QComboBox *combo = static_cast<QComboBox *>(data);
-			const char *name = obs_source_get_name(filter);
-			if (name) {
-				combo->addItem(QString::fromUtf8(name));
-			}
-		},
-		filterCombo);
-
-	obs_source_release(source);
-}
-
-void OmniBarConfig::populateSceneItems(const QString &sceneName)
-{
-	visibilitySourceCombo->clear();
-	if (sceneName.isEmpty())
-		return;
-
-	obs_source_t *sceneSource = obs_get_source_by_name(sceneName.toUtf8().constData());
-	if (!sceneSource)
-		return;
-
-	obs_scene_t *scene = obs_scene_from_source(sceneSource);
-	if (!scene) {
-		obs_source_release(sceneSource);
-		return;
-	}
-
-	obs_scene_enum_items(
-		scene,
-		[](obs_scene_t *, obs_sceneitem_t *item, void *data) {
-			QComboBox *combo = static_cast<QComboBox *>(data);
-			obs_source_t *source = obs_sceneitem_get_source(item);
-			const char *name = obs_source_get_name(source);
-			if (name) {
-				combo->addItem(QString::fromUtf8(name));
-			}
-			return true;
-		},
-		visibilitySourceCombo);
-
-	obs_source_release(sceneSource);
-}
-
-void OmniBarConfig::populateHotkeys()
-{
-	hotkeyCombo->clear();
-
-	obs_enum_hotkeys(
-		[](void *data, obs_hotkey_id id, obs_hotkey_t *key) {
-			Q_UNUSED(id);
-			QComboBox *combo = static_cast<QComboBox *>(data);
-			const char *name = obs_hotkey_get_name(key);
-			if (name) {
-				combo->addItem(QString::fromUtf8(name));
-			}
-			return true;
-		},
-		hotkeyCombo);
 }
 
 void OmniBarConfig::onApply()
@@ -651,16 +753,4 @@ void OmniBarConfig::onOk()
 void OmniBarConfig::onCancel()
 {
 	reject();
-}
-
-void OmniBarConfig::onIconBrowse()
-{
-	QString file = QFileDialog::getOpenFileName(this, obs_module_text("OmniBar.Settings.SelectIcon"), QString(),
-						    "Images (*.png *.svg *.ico *.jpg *.jpeg);;All files (*.*)");
-	if (!file.isEmpty()) {
-		iconCombo->setCurrentIndex(iconCombo->count() - 1); // Custom
-		if (currentEditIndex >= 0 && currentEditIndex < workingButtons.size()) {
-			workingButtons[currentEditIndex]->iconPath = file;
-		}
-	}
 }

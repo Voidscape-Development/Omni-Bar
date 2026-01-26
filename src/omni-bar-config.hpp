@@ -26,9 +26,81 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QCheckBox>
+#include <QLabel>
 #include <memory>
 
 class ButtonConfig;
+
+// Separate dialog for editing a single button
+class ButtonEditDialog : public QDialog {
+	Q_OBJECT
+
+public:
+	explicit ButtonEditDialog(std::shared_ptr<ButtonConfig> config, QWidget *parent = nullptr);
+	~ButtonEditDialog();
+
+	std::shared_ptr<ButtonConfig> getButtonConfig() const { return buttonConfig; }
+
+private slots:
+	void onActionTypeChanged(int index);
+	void onIconChanged(int index);
+	void onIconBrowse();
+	void onSourceChanged(const QString &sourceName);
+	void onSceneChanged(const QString &sceneName);
+	void onOk();
+	void onCancel();
+
+private:
+	void setupUI();
+	void populateFromConfig();
+	void updateConfigFromUI();
+	void populateSources();
+	void populateScenes();
+	void populateFilters(const QString &sourceName);
+	void populateSceneItems(const QString &sceneName);
+	void populateHotkeys();
+	void updateIconPreview();
+
+	std::shared_ptr<ButtonConfig> buttonConfig;
+	QString customIconPath;
+
+	// Common settings
+	QLineEdit *tooltipEdit;
+	QComboBox *iconCombo;
+	QPushButton *iconBrowseButton;
+	QLabel *iconPreview;
+
+	// Action type
+	QComboBox *actionTypeCombo;
+	QStackedWidget *actionStack;
+
+	// Frontend action
+	QWidget *frontendPage;
+	QComboBox *frontendActionCombo;
+
+	// Source hotkey
+	QWidget *hotkeyPage;
+	QComboBox *hotkeySourceCombo;
+	QComboBox *hotkeyCombo;
+
+	// Source filter
+	QWidget *filterPage;
+	QComboBox *filterSourceCombo;
+	QComboBox *filterCombo;
+
+	// Source visibility
+	QWidget *visibilityPage;
+	QComboBox *visibilitySceneCombo;
+	QComboBox *visibilitySourceCombo;
+
+	// Spacer
+	QWidget *spacerPage;
+	QSpinBox *spacerWidthSpin;
+
+	// Expandable options
+	QCheckBox *expandableCheck;
+	QCheckBox *expandWhenActiveCheck;
+};
 
 class OmniBarConfig : public QDialog {
 	Q_OBJECT
@@ -45,29 +117,16 @@ private slots:
 	void onEditButton();
 	void onMoveUp();
 	void onMoveDown();
-	void onButtonSelected(int row);
 	void onButtonDoubleClicked(QListWidgetItem *item);
-	void onActionTypeChanged(int index);
 	void onApply();
 	void onOk();
 	void onCancel();
-	void onIconBrowse();
 
 private:
 	void setupUI();
 	void loadSettings();
 	void saveSettings();
 	void populateButtonList();
-	void populateActionEditor(std::shared_ptr<ButtonConfig> config);
-	void clearActionEditor();
-	void updateCurrentButtonFromEditor();
-	void populateSources();
-	void populateScenes();
-	void populateFilters(const QString &sourceName);
-	void populateSceneItems(const QString &sceneName);
-	void populateHotkeys();
-
-	std::shared_ptr<ButtonConfig> createButtonFromEditor();
 
 	static OmniBarConfig *instance;
 
@@ -79,41 +138,6 @@ private:
 	QPushButton *moveUpButton;
 	QPushButton *moveDownButton;
 
-	// Button editor
-	QWidget *editorWidget;
-	QComboBox *actionTypeCombo;
-	QStackedWidget *actionStack;
-
-	// Common button settings
-	QLineEdit *tooltipEdit;
-	QComboBox *iconCombo;
-	QPushButton *iconBrowseButton;
-	QCheckBox *expandableCheck;
-	QCheckBox *expandWhenActiveCheck;
-
-	// Frontend action editor
-	QWidget *frontendPage;
-	QComboBox *frontendActionCombo;
-
-	// Source hotkey editor
-	QWidget *hotkeyPage;
-	QComboBox *hotkeySourceCombo;
-	QComboBox *hotkeyCombo;
-
-	// Source filter editor
-	QWidget *filterPage;
-	QComboBox *filterSourceCombo;
-	QComboBox *filterCombo;
-
-	// Source visibility editor
-	QWidget *visibilityPage;
-	QComboBox *visibilitySceneCombo;
-	QComboBox *visibilitySourceCombo;
-
-	// Spacer editor
-	QWidget *spacerPage;
-	QSpinBox *spacerWidthSpin;
-
 	// Dock settings
 	QComboBox *dockPositionCombo;
 	QSpinBox *iconSizeSpin;
@@ -121,6 +145,4 @@ private:
 
 	// State
 	QList<std::shared_ptr<ButtonConfig>> workingButtons;
-	int currentEditIndex = -1;
-	bool isEditing = false;
 };

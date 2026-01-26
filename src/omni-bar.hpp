@@ -55,6 +55,7 @@ public:
 	static OmniBar *getInstance() { return instance; }
 
 	void attachToMainWindow(QMainWindow *mainWindow);
+	void repositionToolbar();
 	void rebuildToolbar();
 	void updateButtonStates();
 
@@ -80,6 +81,7 @@ private:
 	QHash<QString, OmniBarButton *> buttonMap;
 	QTimer *updateTimer;
 	QMenu *contextMenu;
+	QMainWindow *mainWindow = nullptr;
 	bool updatePending = false;
 	bool isRebuilding = false;
 };
