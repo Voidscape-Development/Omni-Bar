@@ -85,7 +85,8 @@ static QString getThemedIconPath(const QString &basePath)
 
 // OmniBarButton implementation
 OmniBarButton::OmniBarButton(std::shared_ptr<ButtonConfig> config, QWidget *parent)
-	: QToolButton(parent), buttonConfig(config)
+	: QToolButton(parent),
+	  buttonConfig(config)
 {
 	setCheckable(true);
 	setToolButtonStyle(Qt::ToolButtonIconOnly);
@@ -338,12 +339,14 @@ QIcon OmniBar::getIconForButton(const std::shared_ptr<ButtonConfig> &config)
 				case FrontendActionType::ToggleStreaming:
 				case FrontendActionType::StartStreaming:
 				case FrontendActionType::StopStreaming:
-					defaultIcon = isDarkTheme() ? "icons/stream_dark.svg" : "icons/stream_light.svg";
+					defaultIcon = isDarkTheme() ? "icons/stream_dark.svg"
+								    : "icons/stream_light.svg";
 					break;
 				case FrontendActionType::ToggleRecording:
 				case FrontendActionType::StartRecording:
 				case FrontendActionType::StopRecording:
-					defaultIcon = isDarkTheme() ? "icons/record_dark.svg" : "icons/record_light.svg";
+					defaultIcon = isDarkTheme() ? "icons/record_dark.svg"
+								    : "icons/record_light.svg";
 					break;
 				case FrontendActionType::TogglePauseRecording:
 				case FrontendActionType::PauseRecording:
@@ -353,21 +356,25 @@ QIcon OmniBar::getIconForButton(const std::shared_ptr<ButtonConfig> &config)
 				case FrontendActionType::ToggleReplayBuffer:
 				case FrontendActionType::StartReplayBuffer:
 				case FrontendActionType::StopReplayBuffer:
-					defaultIcon = isDarkTheme() ? "icons/replay_dark.svg" : "icons/replay_light.svg";
+					defaultIcon = isDarkTheme() ? "icons/replay_dark.svg"
+								    : "icons/replay_light.svg";
 					break;
 				case FrontendActionType::SaveReplayBuffer:
-					defaultIcon = isDarkTheme() ? "icons/save-replay_dark.svg" : "icons/save-replay_light.svg";
+					defaultIcon = isDarkTheme() ? "icons/save-replay_dark.svg"
+								    : "icons/save-replay_light.svg";
 					break;
 				case FrontendActionType::ToggleVirtualCam:
 				case FrontendActionType::StartVirtualCam:
 				case FrontendActionType::StopVirtualCam:
-					defaultIcon = isDarkTheme() ? "icons/virtual-cam_dark.svg" : "icons/virtual-cam_light.svg";
+					defaultIcon = isDarkTheme() ? "icons/virtual-cam_dark.svg"
+								    : "icons/virtual-cam_light.svg";
 					break;
 				case FrontendActionType::ToggleStudioMode:
 				case FrontendActionType::EnableStudioMode:
 				case FrontendActionType::DisableStudioMode:
 				case FrontendActionType::TransitionToProgram:
-					defaultIcon = isDarkTheme() ? "icons/studio-mode_dark.svg" : "icons/studio-mode_light.svg";
+					defaultIcon = isDarkTheme() ? "icons/studio-mode_dark.svg"
+								    : "icons/studio-mode_light.svg";
 					break;
 				}
 			}
@@ -414,7 +421,8 @@ void OmniBar::updateButtonStates()
 			bool parentActive = config->action->isActive();
 			for (const auto &childConfig : config->children) {
 				if (buttonMap.contains(childConfig->id)) {
-					buttonMap[childConfig->id]->setVisible(config->expandWhenActive && parentActive);
+					buttonMap[childConfig->id]->setVisible(config->expandWhenActive &&
+									       parentActive);
 				}
 			}
 		}

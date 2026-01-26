@@ -52,7 +52,8 @@ bool obs_module_load(void)
 	omniBar->attachToMainWindow(mainWindow);
 
 	// Add Tools menu entry
-	QAction *action = static_cast<QAction *>(obs_frontend_add_tools_menu_qaction(obs_module_text("OmniBar.Settings.Title")));
+	QAction *action =
+		static_cast<QAction *>(obs_frontend_add_tools_menu_qaction(obs_module_text("OmniBar.Settings.Title")));
 	if (action) {
 		QObject::connect(action, &QAction::triggered, []() { OmniBarConfig::showDialog(); });
 	}

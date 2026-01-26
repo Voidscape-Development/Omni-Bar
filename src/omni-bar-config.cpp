@@ -79,7 +79,8 @@ static QString getThemedIconPath(const QString &basePath)
 // ============================================================================
 
 ButtonEditDialog::ButtonEditDialog(std::shared_ptr<ButtonConfig> config, QWidget *parent)
-	: QDialog(parent), buttonConfig(config)
+	: QDialog(parent),
+	  buttonConfig(config)
 {
 	setWindowTitle(obs_module_text("OmniBar.Settings.EditButton"));
 	setMinimumSize(450, 400);
@@ -134,12 +135,17 @@ void ButtonEditDialog::setupUI()
 
 	// Action type
 	actionTypeCombo = new QComboBox();
-	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.Frontend"), static_cast<int>(ActionType::Frontend));
-	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.SourceHotkey"), static_cast<int>(ActionType::SourceHotkey));
-	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.SourceFilter"), static_cast<int>(ActionType::SourceFilter));
-	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.SourceVisibility"), static_cast<int>(ActionType::SourceVisibility));
+	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.Frontend"),
+				 static_cast<int>(ActionType::Frontend));
+	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.SourceHotkey"),
+				 static_cast<int>(ActionType::SourceHotkey));
+	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.SourceFilter"),
+				 static_cast<int>(ActionType::SourceFilter));
+	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.SourceVisibility"),
+				 static_cast<int>(ActionType::SourceVisibility));
 	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.Spacer"), static_cast<int>(ActionType::Spacer));
-	connect(actionTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &ButtonEditDialog::onActionTypeChanged);
+	connect(actionTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+		&ButtonEditDialog::onActionTypeChanged);
 	formLayout->addRow(obs_module_text("OmniBar.Settings.ActionType"), actionTypeCombo);
 
 	mainLayout->addLayout(formLayout);
@@ -346,15 +352,18 @@ void ButtonEditDialog::updateConfigFromUI()
 		break;
 	}
 	case ActionType::SourceHotkey: {
-		buttonConfig->action = std::make_unique<SourceHotkeyAction>(hotkeySourceCombo->currentText(), hotkeyCombo->currentText());
+		buttonConfig->action = std::make_unique<SourceHotkeyAction>(hotkeySourceCombo->currentText(),
+									    hotkeyCombo->currentText());
 		break;
 	}
 	case ActionType::SourceFilter: {
-		buttonConfig->action = std::make_unique<SourceFilterAction>(filterSourceCombo->currentText(), filterCombo->currentText());
+		buttonConfig->action = std::make_unique<SourceFilterAction>(filterSourceCombo->currentText(),
+									    filterCombo->currentText());
 		break;
 	}
 	case ActionType::SourceVisibility: {
-		buttonConfig->action = std::make_unique<SourceVisibilityAction>(visibilitySceneCombo->currentText(), visibilitySourceCombo->currentText());
+		buttonConfig->action = std::make_unique<SourceVisibilityAction>(visibilitySceneCombo->currentText(),
+										visibilitySourceCombo->currentText());
 		break;
 	}
 	case ActionType::Spacer: {
@@ -629,7 +638,8 @@ void OmniBarConfig::setupUI()
 	mainLayout->addWidget(dockGroup);
 
 	// Dialog buttons
-	QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Apply);
+	QDialogButtonBox *buttonBox =
+		new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Apply);
 	connect(buttonBox, &QDialogButtonBox::accepted, this, &OmniBarConfig::onOk);
 	connect(buttonBox, &QDialogButtonBox::rejected, this, &OmniBarConfig::onCancel);
 	connect(buttonBox->button(QDialogButtonBox::Apply), &QPushButton::clicked, this, &OmniBarConfig::onApply);
