@@ -20,6 +20,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 #include <QUuid>
+#include <QStringList>
 
 // ButtonAction static deserialize
 std::unique_ptr<ButtonAction> ButtonAction::deserialize(obs_data_t *data)
@@ -33,7 +34,9 @@ std::unique_ptr<ButtonAction> ButtonAction::deserialize(obs_data_t *data)
 
 	QString type = QString::fromUtf8(typeStr);
 
-	if (type == "frontend") {
+	if (type == "none") {
+		return std::make_unique<NoAction>();
+	} else if (type == "frontend") {
 		const char *actionStr = obs_data_get_string(data, "action");
 		FrontendActionType actionType = FrontendAction::getFrontendActionFromName(QString::fromUtf8(actionStr));
 		return std::make_unique<FrontendAction>(actionType);
@@ -52,9 +55,32 @@ std::unique_ptr<ButtonAction> ButtonAction::deserialize(obs_data_t *data)
 	} else if (type == "spacer") {
 		int width = static_cast<int>(obs_data_get_int(data, "width"));
 		return std::make_unique<SpacerAction>(width);
+	} else if (type == "divider") {
+		int thickness = static_cast<int>(obs_data_get_int(data, "thickness"));
+		int length = static_cast<int>(obs_data_get_int(data, "length_percent"));
+		auto divider = std::make_unique<DividerAction>(thickness > 0 ? thickness : 1, length > 0 ? length : 70);
+		if (obs_data_get_bool(data, "use_custom_color")) {
+			QColor color(QString::fromUtf8(obs_data_get_string(data, "color")));
+			if (color.isValid())
+				divider->setCustomColor(color);
+		}
+		return divider;
 	}
 
 	return nullptr;
+}
+
+// NoAction implementation
+QString NoAction::getDisplayName() const
+{
+	return QString::fromUtf8(obs_module_text("OmniBar.ActionType.None"));
+}
+
+obs_data_t *NoAction::serialize() const
+{
+	obs_data_t *data = obs_data_create();
+	obs_data_set_string(data, "type", "none");
+	return data;
 }
 
 // FrontendAction implementation
@@ -286,26 +312,55 @@ SourceHotkeyAction::SourceHotkeyAction(const QString &source, const QString &hot
 {
 }
 
+QString SourceHotkeyAction::hotkeyOwnerName(obs_hotkey_t *hotkey)
+{
+	if (!hotkey)
+		return QString();
+
+	if (obs_hotkey_get_registerer_type(hotkey) != OBS_HOTKEY_REGISTERER_SOURCE)
+		return QString();
+
+	auto *weak = static_cast<obs_weak_source_t *>(obs_hotkey_get_registerer(hotkey));
+	if (!weak)
+		return QString();
+
+	obs_source_t *source = obs_weak_source_get_source(weak);
+	if (!source)
+		return QString();
+
+	QString name = QString::fromUtf8(obs_source_get_name(source));
+	obs_source_release(source);
+	return name;
+}
+
 void SourceHotkeyAction::refreshHotkeyId()
 {
 	hotkeyId = OBS_INVALID_HOTKEY_ID;
 
 	struct HotkeySearchData {
 		QString targetName;
+		QString targetSource;
 		obs_hotkey_id *resultId;
 	};
 
-	HotkeySearchData searchData{hotkeyName, &hotkeyId};
+	HotkeySearchData searchData{hotkeyName, sourceName, &hotkeyId};
 
+	// Hotkey names are only unique per registerer - every scene item shares
+	// "libobs.show_scene_item", for instance - so the owning source has to
+	// be part of the match or the wrong source gets triggered.
 	obs_enum_hotkeys(
 		[](void *data, obs_hotkey_id id, obs_hotkey_t *key) {
 			HotkeySearchData *search = static_cast<HotkeySearchData *>(data);
 			QString name = QString::fromUtf8(obs_hotkey_get_name(key));
-			if (name == search->targetName) {
-				*search->resultId = id;
-				return false;
-			}
-			return true;
+			if (name != search->targetName)
+				return true;
+
+			QString owner = SourceHotkeyAction::hotkeyOwnerName(key);
+			if (!search->targetSource.isEmpty() && owner != search->targetSource)
+				return true;
+
+			*search->resultId = id;
+			return false;
 		},
 		&searchData);
 }
@@ -321,8 +376,12 @@ void SourceHotkeyAction::execute()
 
 bool SourceHotkeyAction::isValid() const
 {
-	if (sourceName.isEmpty())
+	if (hotkeyName.isEmpty())
 		return false;
+
+	// Hotkeys that belong to OBS itself have no source to check.
+	if (sourceName.isEmpty())
+		return true;
 
 	obs_source_t *source = obs_get_source_by_name(sourceName.toUtf8().constData());
 	if (!source)
@@ -333,6 +392,8 @@ bool SourceHotkeyAction::isValid() const
 
 QString SourceHotkeyAction::getDisplayName() const
 {
+	if (sourceName.isEmpty())
+		return QString("Hotkey: %1").arg(hotkeyName);
 	return QString("Hotkey: %1 (%2)").arg(hotkeyName, sourceName);
 }
 
@@ -494,11 +555,37 @@ obs_data_t *SourceVisibilityAction::serialize() const
 // SpacerAction implementation
 SpacerAction::SpacerAction(int width) : spacerWidth(width) {}
 
+QString SpacerAction::getDisplayName() const
+{
+	return QString::fromUtf8(obs_module_text("OmniBar.ActionType.Spacer"));
+}
+
 obs_data_t *SpacerAction::serialize() const
 {
 	obs_data_t *data = obs_data_create();
 	obs_data_set_string(data, "type", "spacer");
 	obs_data_set_int(data, "width", spacerWidth);
+	return data;
+}
+
+// DividerAction implementation
+DividerAction::DividerAction(int lineThickness, int linePercent) : thickness(lineThickness), lengthPercent(linePercent)
+{
+}
+
+QString DividerAction::getDisplayName() const
+{
+	return QString::fromUtf8(obs_module_text("OmniBar.ActionType.Divider"));
+}
+
+obs_data_t *DividerAction::serialize() const
+{
+	obs_data_t *data = obs_data_create();
+	obs_data_set_string(data, "type", "divider");
+	obs_data_set_int(data, "thickness", thickness);
+	obs_data_set_int(data, "length_percent", lengthPercent);
+	obs_data_set_bool(data, "use_custom_color", hasCustomColor());
+	obs_data_set_string(data, "color", color.isValid() ? color.name(QColor::HexArgb).toUtf8().constData() : "");
 	return data;
 }
 
@@ -512,10 +599,17 @@ obs_data_t *ButtonConfig::serialize() const
 {
 	obs_data_t *data = obs_data_create();
 	obs_data_set_string(data, "id", id.toUtf8().constData());
+	obs_data_set_string(data, "label", label.toUtf8().constData());
 	obs_data_set_string(data, "tooltip", tooltip.toUtf8().constData());
 	obs_data_set_string(data, "icon", iconPath.toUtf8().constData());
-	obs_data_set_bool(data, "expandable", expandable);
-	obs_data_set_bool(data, "expand_when_active", expandWhenActive);
+	obs_data_set_int(data, "display_mode", static_cast<int>(displayMode));
+	obs_data_set_bool(data, "tint_icon", tintIcon);
+	obs_data_set_bool(data, "use_custom_color", useCustomColor);
+	obs_data_set_string(data, "custom_color",
+			    customColor.isValid() ? customColor.name(QColor::HexArgb).toUtf8().constData() : "");
+	obs_data_set_bool(data, "is_group", isGroup);
+	obs_data_set_int(data, "group_display", static_cast<int>(groupDisplay));
+	obs_data_set_int(data, "group_expand", static_cast<int>(groupExpand));
 
 	if (action) {
 		obs_data_t *actionData = action->serialize();
@@ -543,17 +637,46 @@ std::shared_ptr<ButtonConfig> ButtonConfig::deserialize(obs_data_t *data)
 		return nullptr;
 
 	auto config = std::make_shared<ButtonConfig>();
-	config->id = QString::fromUtf8(obs_data_get_string(data, "id"));
+	QString storedId = QString::fromUtf8(obs_data_get_string(data, "id"));
+	if (!storedId.isEmpty())
+		config->id = storedId;
+	config->label = QString::fromUtf8(obs_data_get_string(data, "label"));
 	config->tooltip = QString::fromUtf8(obs_data_get_string(data, "tooltip"));
 	config->iconPath = QString::fromUtf8(obs_data_get_string(data, "icon"));
-	config->expandable = obs_data_get_bool(data, "expandable");
-	config->expandWhenActive = obs_data_get_bool(data, "expand_when_active");
+	config->displayMode = static_cast<ButtonDisplayMode>(obs_data_get_int(data, "display_mode"));
+	config->tintIcon = obs_data_get_bool(data, "tint_icon");
+
+	config->useCustomColor = obs_data_get_bool(data, "use_custom_color");
+	QString colorName = QString::fromUtf8(obs_data_get_string(data, "custom_color"));
+	if (!colorName.isEmpty()) {
+		QColor color(colorName);
+		if (color.isValid())
+			config->customColor = color;
+	}
+	if (!config->customColor.isValid())
+		config->useCustomColor = false;
+
+	if (obs_data_has_user_value(data, "is_group")) {
+		config->isGroup = obs_data_get_bool(data, "is_group");
+		config->groupDisplay = static_cast<GroupDisplayMode>(obs_data_get_int(data, "group_display"));
+		config->groupExpand = static_cast<GroupExpandMode>(obs_data_get_int(data, "group_expand"));
+	} else {
+		// Configurations written before groups were reworked used
+		// "expandable" plus "expand_when_active", which only ever
+		// described an inline group.
+		config->isGroup = obs_data_get_bool(data, "expandable");
+		config->groupDisplay = GroupDisplayMode::Inline;
+		config->groupExpand = obs_data_get_bool(data, "expand_when_active") ? GroupExpandMode::ParentActive
+										    : GroupExpandMode::Click;
+	}
 
 	obs_data_t *actionData = obs_data_get_obj(data, "action");
 	if (actionData) {
 		config->action = ButtonAction::deserialize(actionData);
 		obs_data_release(actionData);
 	}
+	if (!config->action)
+		config->action = std::make_unique<NoAction>();
 
 	obs_data_array_t *childArray = obs_data_get_array(data, "children");
 	if (childArray) {
@@ -563,6 +686,10 @@ std::shared_ptr<ButtonConfig> ButtonConfig::deserialize(obs_data_t *data)
 			if (childData) {
 				auto child = ButtonConfig::deserialize(childData);
 				if (child) {
+					// Nesting is capped at one level, so a
+					// child never stays a group itself.
+					child->isGroup = false;
+					child->children.clear();
 					config->children.append(child);
 				}
 				obs_data_release(childData);
@@ -571,12 +698,112 @@ std::shared_ptr<ButtonConfig> ButtonConfig::deserialize(obs_data_t *data)
 		obs_data_array_release(childArray);
 	}
 
+	if (!config->isGroup)
+		config->children.clear();
+
 	return config;
+}
+
+bool ButtonConfig::isSpacer() const
+{
+	return action && action->getType() == ActionType::Spacer;
+}
+
+bool ButtonConfig::isDivider() const
+{
+	return action && action->getType() == ActionType::Divider;
+}
+
+bool ButtonConfig::isDecoration() const
+{
+	return isSpacer() || isDivider();
+}
+
+bool ButtonConfig::hasAction() const
+{
+	return action && action->getType() != ActionType::None && !isDecoration();
 }
 
 bool ButtonConfig::isValid() const
 {
 	if (!action)
 		return false;
+
+	if (isGroup) {
+		// A group survives as long as it can still show something:
+		// its own action, or at least one usable child.
+		if (hasAction() && action->isValid())
+			return true;
+		if (children.isEmpty())
+			return true;
+		for (const auto &child : children) {
+			if (child && child->isValid())
+				return true;
+		}
+		return false;
+	}
+
 	return action->isValid();
+}
+
+QString ButtonConfig::displayText() const
+{
+	if (!label.isEmpty())
+		return label;
+	if (!tooltip.isEmpty())
+		return tooltip;
+	if (action)
+		return action->getDisplayName();
+	return id;
+}
+
+QString ButtonConfig::summaryText() const
+{
+	if (isSpacer()) {
+		auto *spacer = dynamic_cast<SpacerAction *>(action.get());
+		return QString("%1 px").arg(spacer ? spacer->getWidth() : 0);
+	}
+
+	if (isDivider()) {
+		auto *divider = dynamic_cast<DividerAction *>(action.get());
+		if (!divider)
+			return QString();
+		return QString("%1 px / %2 %").arg(divider->getThickness()).arg(divider->getLengthPercent());
+	}
+
+	if (isGroup) {
+		QString modeKey;
+		switch (groupExpand) {
+		case GroupExpandMode::Click:
+			modeKey = "OmniBar.Group.Expand.Click";
+			break;
+		case GroupExpandMode::ParentActive:
+			modeKey = "OmniBar.Group.Expand.ParentActive";
+			break;
+		case GroupExpandMode::Hover:
+			modeKey = "OmniBar.Group.Expand.Hover";
+			break;
+		}
+
+		QString displayKey = groupDisplay == GroupDisplayMode::Flyout ? "OmniBar.Group.Display.Flyout"
+									      : "OmniBar.Group.Display.Inline";
+
+		QStringList parts;
+		parts << QString::fromUtf8(obs_module_text("OmniBar.Group.ChildCount")).arg(children.size());
+		parts << QString::fromUtf8(obs_module_text(displayKey.toUtf8().constData()));
+		parts << QString::fromUtf8(obs_module_text(modeKey.toUtf8().constData()));
+		if (hasAction())
+			parts << action->getDisplayName();
+		return parts.join(" - ");
+	}
+
+	return action ? action->getDisplayName() : QString();
+}
+
+std::shared_ptr<ButtonConfig> ButtonConfig::clone() const
+{
+	obs_data_t *data = serialize();
+	auto copy = ButtonConfig::deserialize(data);
+	obs_data_release(data);
+	return copy;
 }

@@ -1,3 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+  <path d="M4 7h9.8"/>
+  <circle cx="16" cy="7" r="2.2"/>
+  <path d="M18.2 7H20"/>
+  <path d="M4 12h1.8"/>
+  <circle cx="8" cy="12" r="2.2"/>
+  <path d="M10.2 12H20"/>
+  <path d="M4 17h9.8"/>
+  <circle cx="16" cy="17" r="2.2"/>
+  <path d="M18.2 17H20"/>
 </svg>

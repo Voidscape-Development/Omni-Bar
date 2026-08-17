@@ -22,19 +22,14 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <obs-data.h>
 #include <QString>
 #include <QIcon>
+#include <QColor>
 #include <memory>
 #include <QList>
 
 // Forward declaration
 class ButtonConfig;
 
-enum class ActionType {
-	Frontend,
-	SourceHotkey,
-	SourceFilter,
-	SourceVisibility,
-	Spacer
-};
+enum class ActionType { None, Frontend, SourceHotkey, SourceFilter, SourceVisibility, Spacer, Divider };
 
 enum class FrontendActionType {
 	StartStreaming,
@@ -59,6 +54,16 @@ enum class FrontendActionType {
 	TransitionToProgram
 };
 
+// Where a button's label sits relative to its icon. The numbers are written to
+// the configuration file, so existing ones must keep their values.
+enum class ButtonDisplayMode { IconOnly = 0, TextOnly = 1, TextRight = 2, TextBelow = 3, TextLeft = 4, TextAbove = 5 };
+
+// How a group presents its children.
+enum class GroupDisplayMode { Flyout = 0, Inline = 1 };
+
+// What causes a group to expand.
+enum class GroupExpandMode { Click = 0, ParentActive = 1, Hover = 2 };
+
 class ButtonAction {
 public:
 	virtual ~ButtonAction() = default;
@@ -69,6 +74,16 @@ public:
 	virtual QString getDisplayName() const = 0;
 	virtual obs_data_t *serialize() const = 0;
 	static std::unique_ptr<ButtonAction> deserialize(obs_data_t *data);
+};
+
+// Placeholder for a button that does nothing on its own, used by groups that
+// exist purely to hold children.
+class NoAction : public ButtonAction {
+public:
+	ActionType getType() const override { return ActionType::None; }
+	void execute() override {}
+	QString getDisplayName() const override;
+	obs_data_t *serialize() const override;
 };
 
 class FrontendAction : public ButtonAction {
@@ -105,6 +120,10 @@ public:
 	QString getHotkeyName() const { return hotkeyName; }
 	void setSourceName(const QString &name) { sourceName = name; }
 	void setHotkeyName(const QString &name) { hotkeyName = name; }
+
+	// Name of the source a hotkey is registered against, or an empty string
+	// for hotkeys that belong to OBS itself rather than to a source.
+	static QString hotkeyOwnerName(obs_hotkey_t *hotkey);
 
 private:
 	QString sourceName;
@@ -162,7 +181,7 @@ public:
 
 	ActionType getType() const override { return ActionType::Spacer; }
 	void execute() override {}
-	QString getDisplayName() const override { return "Spacer"; }
+	QString getDisplayName() const override;
 	obs_data_t *serialize() const override;
 
 	int getWidth() const { return spacerWidth; }
@@ -172,21 +191,94 @@ private:
 	int spacerWidth;
 };
 
+// A line drawn across the bar to visually separate neighbouring buttons.
+class DividerAction : public ButtonAction {
+public:
+	DividerAction(int thickness = 1, int lengthPercent = 70);
+
+	ActionType getType() const override { return ActionType::Divider; }
+	void execute() override {}
+	QString getDisplayName() const override;
+	obs_data_t *serialize() const override;
+
+	int getThickness() const { return thickness; }
+	void setThickness(int value) { thickness = value; }
+
+	// Length of the line across the bar, as a percentage of the bar's
+	// thickness, so it can be inset from the edges.
+	int getLengthPercent() const { return lengthPercent; }
+	void setLengthPercent(int value) { lengthPercent = value; }
+
+	bool hasCustomColor() const { return useCustomColor && color.isValid(); }
+	QColor getCustomColor() const { return color; }
+	void setCustomColor(const QColor &value)
+	{
+		color = value;
+		useCustomColor = value.isValid();
+	}
+	void clearCustomColor()
+	{
+		useCustomColor = false;
+		color = QColor();
+	}
+
+private:
+	int thickness;
+	int lengthPercent;
+	bool useCustomColor = false;
+	QColor color;
+};
+
 // Button configuration class
 class ButtonConfig {
 public:
 	ButtonConfig();
 
 	QString id;
+	QString label;
 	QString tooltip;
 	QString iconPath;
 	std::unique_ptr<ButtonAction> action;
-	bool expandable = false;
-	bool expandWhenActive = false;
+
+	ButtonDisplayMode displayMode = ButtonDisplayMode::IconOnly;
+
+	// Recolour a user-supplied icon to match the bar. Bundled icons always
+	// follow the bar; a custom file is drawn as authored unless this is set,
+	// since recolouring would ruin a deliberately coloured graphic.
+	bool tintIcon = false;
+
+	// Per-button accent override for the hover/active states.
+	bool useCustomColor = false;
+	QColor customColor;
+
+	// Group settings. Children are limited to one level deep: a child is
+	// never itself a group.
+	bool isGroup = false;
+	GroupDisplayMode groupDisplay = GroupDisplayMode::Flyout;
+	GroupExpandMode groupExpand = GroupExpandMode::Click;
 	QList<std::shared_ptr<ButtonConfig>> children;
 
 	obs_data_t *serialize() const;
 	static std::shared_ptr<ButtonConfig> deserialize(obs_data_t *data);
 
 	bool isValid() const;
+	bool isSpacer() const;
+	bool isDivider() const;
+
+	// True for entries that are bar decoration rather than a button.
+	bool isDecoration() const;
+
+	// True when the button runs something of its own, as opposed to a group
+	// that only opens and closes.
+	bool hasAction() const;
+
+	// Text shown for this button in the settings tree.
+	QString displayText() const;
+
+	// One-line summary of what the button does, for the settings tree.
+	QString summaryText() const;
+
+	// Deep copy, used so the editor can be cancelled without touching the
+	// live configuration.
+	std::shared_ptr<ButtonConfig> clone() const;
 };

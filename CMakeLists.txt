@@ -36,11 +36,13 @@ endif()
 
 target_sources(
   ${CMAKE_PROJECT_NAME}
-  PRIVATE src/plugin-main.cpp
-          src/omni-bar.cpp
-          src/omni-bar-config.cpp
-          src/button-action.cpp
-          src/settings-manager.cpp
+  PRIVATE
+    src/plugin-main.cpp
+    src/omni-bar.cpp
+    src/omni-bar-config.cpp
+    src/button-action.cpp
+    src/bar-style.cpp
+    src/settings-manager.cpp
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
