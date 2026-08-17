@@ -35,6 +35,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QBuffer>
 #include <QImageReader>
 #include <QHash>
+#include <QStylePainter>
+#include <QStyleOptionToolButton>
 
 OmniBar *OmniBar::instance = nullptr;
 
@@ -238,6 +240,14 @@ void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_ptr<But
 		label = config->action->getDisplayName();
 	button->setText(label);
 
+	// Qt only lays a tool button's label out to the right of or below the
+	// icon. The other two placements are produced from those: mirroring the
+	// button moves the label to the left, and OmniBarButton paints the
+	// text-above case itself. Both borrow the matching Qt style so the size
+	// hint stays correct.
+	button->setLayoutDirection(config->displayMode == ButtonDisplayMode::TextLeft ? Qt::RightToLeft
+										      : Qt::LeftToRight);
+
 	switch (config->displayMode) {
 	case ButtonDisplayMode::IconOnly:
 		button->setToolButtonStyle(Qt::ToolButtonIconOnly);
@@ -245,10 +255,12 @@ void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_ptr<But
 	case ButtonDisplayMode::TextOnly:
 		button->setToolButtonStyle(Qt::ToolButtonTextOnly);
 		break;
-	case ButtonDisplayMode::TextBeside:
+	case ButtonDisplayMode::TextRight:
+	case ButtonDisplayMode::TextLeft:
 		button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 		break;
-	case ButtonDisplayMode::TextUnder:
+	case ButtonDisplayMode::TextBelow:
+	case ButtonDisplayMode::TextAbove:
 		button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
 		break;
 	}
@@ -259,12 +271,12 @@ void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_ptr<But
 	if (config->displayMode == ButtonDisplayMode::IconOnly) {
 		button->setFixedSize(extent, extent);
 	} else {
+		bool stacked = config->displayMode == ButtonDisplayMode::TextBelow ||
+			       config->displayMode == ButtonDisplayMode::TextAbove;
+
 		button->setMinimumSize(0, 0);
 		button->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-		int minHeight = config->displayMode == ButtonDisplayMode::TextUnder
-					? extent + button->fontMetrics().height()
-					: extent;
-		button->setMinimumHeight(minHeight);
+		button->setMinimumHeight(stacked ? extent + button->fontMetrics().height() : extent);
 		button->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 	}
 
@@ -310,9 +322,15 @@ void OmniBarButton::setCollapsed(bool value)
 	refreshVisibility();
 }
 
+void OmniBarButton::setPreviewMode(bool enabled)
+{
+	previewMode = enabled;
+	refreshVisibility();
+}
+
 void OmniBarButton::refreshVisibility()
 {
-	setVisible(actionValid && !collapsed);
+	setVisible(previewMode || (actionValid && !collapsed));
 }
 
 void OmniBarButton::updateState()
@@ -343,9 +361,43 @@ QRect OmniBarButton::indicatorRect() const
 	return QRect(width() - extent - 2, height() - extent - 2, extent, extent);
 }
 
+// Qt has no text-above-icon tool button style, so this draws the frame without
+// a label and then places the icon and text by hand. The button still carries
+// Qt's text-under-icon style, which keeps its size hint correct.
+void OmniBarButton::paintLabelAbove()
+{
+	QStylePainter painter(this);
+	QStyleOptionToolButton option;
+	initStyleOption(&option);
+
+	QStyleOptionToolButton frame = option;
+	frame.text.clear();
+	frame.icon = QIcon();
+	painter.drawComplexControl(QStyle::CC_ToolButton, frame);
+
+	const int gap = 4;
+	QFontMetrics metrics(font());
+	QSize icon = iconSize();
+	int textHeight = metrics.height();
+	int top = rect().top() + (rect().height() - (textHeight + gap + icon.height())) / 2;
+
+	QRect textRect(rect().left(), top, rect().width(), textHeight);
+	painter.setPen(palette().color(isEnabled() ? QPalette::Active : QPalette::Disabled, QPalette::ButtonText));
+	painter.drawText(textRect, Qt::AlignHCenter | Qt::AlignVCenter,
+			 metrics.elidedText(text(), Qt::ElideRight, textRect.width()));
+
+	QRect iconRect(rect().left() + (rect().width() - icon.width()) / 2, top + textHeight + gap, icon.width(),
+		       icon.height());
+	option.icon.paint(&painter, iconRect, Qt::AlignCenter, isEnabled() ? QIcon::Normal : QIcon::Disabled,
+			  isChecked() ? QIcon::On : QIcon::Off);
+}
+
 void OmniBarButton::paintEvent(QPaintEvent *event)
 {
-	QToolButton::paintEvent(event);
+	if (buttonConfig && buttonConfig->displayMode == ButtonDisplayMode::TextAbove)
+		paintLabelAbove();
+	else
+		QToolButton::paintEvent(event);
 
 	if (!showIndicator)
 		return;

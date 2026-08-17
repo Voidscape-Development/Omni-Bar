@@ -65,6 +65,9 @@ public:
 	// validity so a state refresh can never re-show a collapsed child.
 	void setCollapsed(bool collapsed);
 
+	// Previews render the button whether or not its target currently exists.
+	void setPreviewMode(bool enabled);
+
 signals:
 	void expandRequested();
 	void hoverEntered();
@@ -82,6 +85,7 @@ private slots:
 private:
 	QRect indicatorRect() const;
 	void refreshVisibility();
+	void paintLabelAbove();
 
 	std::shared_ptr<ButtonConfig> buttonConfig;
 	bool showIndicator = false;
@@ -89,6 +93,7 @@ private:
 	bool indicatorIsSplit = false;
 	bool collapsed = false;
 	bool actionValid = true;
+	bool previewMode = false;
 };
 
 // A line across the bar, separating neighbouring buttons.

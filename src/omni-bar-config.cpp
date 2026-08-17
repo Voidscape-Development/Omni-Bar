@@ -142,15 +142,8 @@ ButtonPreview::ButtonPreview(QWidget *parent) : QWidget(parent)
 	backdrop->setObjectName("OmniBarPreviewBackdrop");
 	backdrop->setMinimumHeight(96);
 
-	QVBoxLayout *inner = new QVBoxLayout(backdrop);
-	inner->setContentsMargins(16, 16, 16, 16);
-
-	previewButton = new QToolButton(backdrop);
-	previewButton->setCheckable(true);
-	previewButton->setFocusPolicy(Qt::NoFocus);
-	// The preview is a picture of a button, not a working one.
-	previewButton->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-	inner->addWidget(previewButton, 0, Qt::AlignCenter);
+	backdropLayout = new QVBoxLayout(backdrop);
+	backdropLayout->setContentsMargins(16, 16, 16, 16);
 
 	layout->addWidget(backdrop);
 }
@@ -161,8 +154,19 @@ void ButtonPreview::refresh(const BarStyle &style, const std::shared_ptr<ButtonC
 		return;
 
 	backdrop->setStyleSheet(style.panelStyleSheet(QStringLiteral("OmniBarPreviewBackdrop")));
-	omniBarApplyButtonAppearance(previewButton, config, style);
+
+	// Rebuilt rather than restyled: a bar button takes its config in the
+	// constructor, and using the real class is what keeps the preview honest.
+	delete previewButton;
+	previewButton = new OmniBarButton(config, backdrop);
+	previewButton->setPreviewMode(true);
+	// A picture of a button, not a working one.
+	previewButton->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+	previewButton->applyStyle(style);
+	previewButton->setGroupIndicator(config->isGroup, false, false);
 	previewButton->setChecked(active);
+
+	backdropLayout->addWidget(previewButton, 0, Qt::AlignCenter);
 }
 
 // ============================================================================
@@ -463,10 +467,14 @@ QWidget *ButtonEditDialog::createAppearanceTab()
 				  static_cast<int>(ButtonDisplayMode::IconOnly));
 	displayModeCombo->addItem(obs_module_text("OmniBar.Display.TextOnly"),
 				  static_cast<int>(ButtonDisplayMode::TextOnly));
-	displayModeCombo->addItem(obs_module_text("OmniBar.Display.TextBeside"),
-				  static_cast<int>(ButtonDisplayMode::TextBeside));
-	displayModeCombo->addItem(obs_module_text("OmniBar.Display.TextUnder"),
-				  static_cast<int>(ButtonDisplayMode::TextUnder));
+	displayModeCombo->addItem(obs_module_text("OmniBar.Display.TextLeft"),
+				  static_cast<int>(ButtonDisplayMode::TextLeft));
+	displayModeCombo->addItem(obs_module_text("OmniBar.Display.TextRight"),
+				  static_cast<int>(ButtonDisplayMode::TextRight));
+	displayModeCombo->addItem(obs_module_text("OmniBar.Display.TextAbove"),
+				  static_cast<int>(ButtonDisplayMode::TextAbove));
+	displayModeCombo->addItem(obs_module_text("OmniBar.Display.TextBelow"),
+				  static_cast<int>(ButtonDisplayMode::TextBelow));
 	connect(displayModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
 		&ButtonEditDialog::refreshPreview);
 	form->addRow(obs_module_text("OmniBar.Settings.DisplayMode"), displayModeCombo);

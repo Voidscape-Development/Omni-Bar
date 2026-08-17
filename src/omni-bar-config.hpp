@@ -68,7 +68,10 @@ public:
 
 private:
 	QWidget *backdrop;
-	QToolButton *previewButton;
+	QBoxLayout *backdropLayout;
+	// A real bar button, so placements the bar draws itself - such as a label
+	// above the icon - show up here too.
+	OmniBarButton *previewButton = nullptr;
 };
 
 // Editor for a single button, group or spacer.

@@ -54,8 +54,9 @@ enum class FrontendActionType {
 	TransitionToProgram
 };
 
-// How a button renders its label alongside its icon.
-enum class ButtonDisplayMode { IconOnly = 0, TextOnly = 1, TextBeside = 2, TextUnder = 3 };
+// Where a button's label sits relative to its icon. The numbers are written to
+// the configuration file, so existing ones must keep their values.
+enum class ButtonDisplayMode { IconOnly = 0, TextOnly = 1, TextRight = 2, TextBelow = 3, TextLeft = 4, TextAbove = 5 };
 
 // How a group presents its children.
 enum class GroupDisplayMode { Flyout = 0, Inline = 1 };
