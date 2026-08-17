@@ -23,14 +23,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QList>
 #include <memory>
 
+#include "bar-style.hpp"
+
 class ButtonConfig;
 
-enum class DockPosition {
-	Top = 0,
-	Left = 1,
-	Bottom = 2,
-	Right = 3
-};
+enum class DockPosition { Top = 0, Left = 1, Bottom = 2, Right = 3 };
 
 class SettingsManager {
 public:
@@ -41,11 +38,9 @@ public:
 	static DockPosition getDockPosition();
 	static void setDockPosition(DockPosition position);
 
-	static int getIconSize();
-	static void setIconSize(int size);
-
-	static int getButtonPadding();
-	static void setButtonPadding(int padding);
+	// Bar and button styling
+	static const BarStyle &getStyle();
+	static void setStyle(const BarStyle &style);
 
 	// Button configuration
 	static QList<std::shared_ptr<ButtonConfig>> getButtons();
@@ -59,8 +54,7 @@ private:
 	static QString getConfigPath();
 
 	static DockPosition dockPosition;
-	static int iconSize;
-	static int buttonPadding;
+	static BarStyle style;
 	static QList<std::shared_ptr<ButtonConfig>> buttons;
 	static bool loaded;
 };

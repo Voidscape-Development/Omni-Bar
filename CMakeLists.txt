@@ -40,6 +40,7 @@ target_sources(
           src/omni-bar.cpp
           src/omni-bar-config.cpp
           src/button-action.cpp
+          src/bar-style.cpp
           src/settings-manager.cpp
 )
 

@@ -22,10 +22,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <util/platform.h>
 #include <QFile>
 
-// Static member initialization
+// Static member initialization. The style is left default-constructed here
+// rather than built from a preset: static initialisation runs before the plugin
+// is loaded, and preset colours are read from the Qt palette.
 DockPosition SettingsManager::dockPosition = DockPosition::Top;
-int SettingsManager::iconSize = 32;
-int SettingsManager::buttonPadding = 4;
+BarStyle SettingsManager::style;
 QList<std::shared_ptr<ButtonConfig>> SettingsManager::buttons;
 bool SettingsManager::loaded = false;
 
@@ -42,9 +43,13 @@ void SettingsManager::load()
 	if (loaded)
 		return;
 
+	style = BarStyle::fromPreset(StylePreset::ObsNative);
+
 	QString configPath = getConfigPath();
-	if (configPath.isEmpty())
+	if (configPath.isEmpty()) {
+		loaded = true;
 		return;
+	}
 
 	obs_data_t *data = obs_data_create_from_json_file(configPath.toUtf8().constData());
 	if (!data) {
@@ -53,12 +58,24 @@ void SettingsManager::load()
 	}
 
 	dockPosition = static_cast<DockPosition>(obs_data_get_int(data, "dock_position"));
-	iconSize = static_cast<int>(obs_data_get_int(data, "icon_size"));
-	if (iconSize <= 0)
-		iconSize = 32;
-	buttonPadding = static_cast<int>(obs_data_get_int(data, "button_padding"));
-	if (buttonPadding < 0)
-		buttonPadding = 4;
+
+	obs_data_t *styleData = obs_data_get_obj(data, "style");
+	if (styleData) {
+		style = BarStyle::deserialize(styleData);
+		obs_data_release(styleData);
+	} else {
+		// Pre-styling configurations only stored these two numbers.
+		if (obs_data_has_user_value(data, "icon_size")) {
+			int iconSize = static_cast<int>(obs_data_get_int(data, "icon_size"));
+			if (iconSize > 0)
+				style.iconSize = iconSize;
+		}
+		if (obs_data_has_user_value(data, "button_padding")) {
+			int padding = static_cast<int>(obs_data_get_int(data, "button_padding"));
+			if (padding >= 0)
+				style.spacing = padding;
+		}
+	}
 
 	buttons.clear();
 	obs_data_array_t *buttonArray = obs_data_get_array(data, "buttons");
@@ -97,8 +114,10 @@ void SettingsManager::save()
 	obs_data_t *data = obs_data_create();
 
 	obs_data_set_int(data, "dock_position", static_cast<int>(dockPosition));
-	obs_data_set_int(data, "icon_size", iconSize);
-	obs_data_set_int(data, "button_padding", buttonPadding);
+
+	obs_data_t *styleData = style.serialize();
+	obs_data_set_obj(data, "style", styleData);
+	obs_data_release(styleData);
 
 	obs_data_array_t *buttonArray = obs_data_array_create();
 	for (const auto &button : buttons) {
@@ -125,24 +144,14 @@ void SettingsManager::setDockPosition(DockPosition position)
 	dockPosition = position;
 }
 
-int SettingsManager::getIconSize()
+const BarStyle &SettingsManager::getStyle()
 {
-	return iconSize;
+	return style;
 }
 
-void SettingsManager::setIconSize(int size)
+void SettingsManager::setStyle(const BarStyle &newStyle)
 {
-	iconSize = size;
-}
-
-int SettingsManager::getButtonPadding()
-{
-	return buttonPadding;
-}
-
-void SettingsManager::setButtonPadding(int padding)
-{
-	buttonPadding = padding;
+	style = newStyle;
 }
 
 QList<std::shared_ptr<ButtonConfig>> SettingsManager::getButtons()

@@ -22,19 +22,14 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <obs-data.h>
 #include <QString>
 #include <QIcon>
+#include <QColor>
 #include <memory>
 #include <QList>
 
 // Forward declaration
 class ButtonConfig;
 
-enum class ActionType {
-	Frontend,
-	SourceHotkey,
-	SourceFilter,
-	SourceVisibility,
-	Spacer
-};
+enum class ActionType { None, Frontend, SourceHotkey, SourceFilter, SourceVisibility, Spacer };
 
 enum class FrontendActionType {
 	StartStreaming,
@@ -59,6 +54,15 @@ enum class FrontendActionType {
 	TransitionToProgram
 };
 
+// How a button renders its label alongside its icon.
+enum class ButtonDisplayMode { IconOnly = 0, TextOnly = 1, TextBeside = 2, TextUnder = 3 };
+
+// How a group presents its children.
+enum class GroupDisplayMode { Flyout = 0, Inline = 1 };
+
+// What causes a group to expand.
+enum class GroupExpandMode { Click = 0, ParentActive = 1, Hover = 2 };
+
 class ButtonAction {
 public:
 	virtual ~ButtonAction() = default;
@@ -69,6 +73,16 @@ public:
 	virtual QString getDisplayName() const = 0;
 	virtual obs_data_t *serialize() const = 0;
 	static std::unique_ptr<ButtonAction> deserialize(obs_data_t *data);
+};
+
+// Placeholder for a button that does nothing on its own, used by groups that
+// exist purely to hold children.
+class NoAction : public ButtonAction {
+public:
+	ActionType getType() const override { return ActionType::None; }
+	void execute() override {}
+	QString getDisplayName() const override;
+	obs_data_t *serialize() const override;
 };
 
 class FrontendAction : public ButtonAction {
@@ -105,6 +119,10 @@ public:
 	QString getHotkeyName() const { return hotkeyName; }
 	void setSourceName(const QString &name) { sourceName = name; }
 	void setHotkeyName(const QString &name) { hotkeyName = name; }
+
+	// Name of the source a hotkey is registered against, or an empty string
+	// for hotkeys that belong to OBS itself rather than to a source.
+	static QString hotkeyOwnerName(obs_hotkey_t *hotkey);
 
 private:
 	QString sourceName;
@@ -162,7 +180,7 @@ public:
 
 	ActionType getType() const override { return ActionType::Spacer; }
 	void execute() override {}
-	QString getDisplayName() const override { return "Spacer"; }
+	QString getDisplayName() const override;
 	obs_data_t *serialize() const override;
 
 	int getWidth() const { return spacerWidth; }
@@ -178,15 +196,41 @@ public:
 	ButtonConfig();
 
 	QString id;
+	QString label;
 	QString tooltip;
 	QString iconPath;
 	std::unique_ptr<ButtonAction> action;
-	bool expandable = false;
-	bool expandWhenActive = false;
+
+	ButtonDisplayMode displayMode = ButtonDisplayMode::IconOnly;
+
+	// Per-button accent override for the hover/active states.
+	bool useCustomColor = false;
+	QColor customColor;
+
+	// Group settings. Children are limited to one level deep: a child is
+	// never itself a group.
+	bool isGroup = false;
+	GroupDisplayMode groupDisplay = GroupDisplayMode::Flyout;
+	GroupExpandMode groupExpand = GroupExpandMode::Click;
 	QList<std::shared_ptr<ButtonConfig>> children;
 
 	obs_data_t *serialize() const;
 	static std::shared_ptr<ButtonConfig> deserialize(obs_data_t *data);
 
 	bool isValid() const;
+	bool isSpacer() const;
+
+	// True when the button runs something of its own, as opposed to a group
+	// that only opens and closes.
+	bool hasAction() const;
+
+	// Text shown for this button in the settings tree.
+	QString displayText() const;
+
+	// One-line summary of what the button does, for the settings tree.
+	QString summaryText() const;
+
+	// Deep copy, used so the editor can be cancelled without touching the
+	// live configuration.
+	std::shared_ptr<ButtonConfig> clone() const;
 };

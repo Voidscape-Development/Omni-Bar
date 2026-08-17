@@ -23,11 +23,26 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QTimer>
 #include <QMenu>
 #include <QHash>
+#include <QPointer>
+#include <QElapsedTimer>
 #include <obs-frontend-api.h>
 #include <memory>
+#include <vector>
+
+#include "bar-style.hpp"
 
 class ButtonConfig;
 class QMainWindow;
+class QBoxLayout;
+
+// Icon for a button, resolving themed variants and falling back to a sensible
+// default for the button's action type.
+QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config);
+
+// Apply a config's label, display mode, icon and colour override to a tool
+// button. Shared with the settings dialog so its preview matches the real bar.
+void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_ptr<ButtonConfig> &config,
+				  const BarStyle &style);
 
 class OmniBarButton : public QToolButton {
 	Q_OBJECT
@@ -35,14 +50,70 @@ class OmniBarButton : public QToolButton {
 public:
 	OmniBarButton(std::shared_ptr<ButtonConfig> config, QWidget *parent = nullptr);
 
+	void applyStyle(const BarStyle &style);
 	void updateState();
+
 	std::shared_ptr<ButtonConfig> getConfig() const { return buttonConfig; }
+
+	// Draw a chevron marking this button as a group. When interactive is set
+	// a click emits expandRequested instead of running the action; adding
+	// splitTarget narrows that to the chevron corner so the rest of the
+	// button still runs the group's own action.
+	void setGroupIndicator(bool visible, bool interactive, bool splitTarget);
+
+	// Set by the owning group when it collapses. Kept separate from action
+	// validity so a state refresh can never re-show a collapsed child.
+	void setCollapsed(bool collapsed);
+
+signals:
+	void expandRequested();
+	void hoverEntered();
+	void hoverLeft();
+
+protected:
+	void paintEvent(QPaintEvent *event) override;
+	void mousePressEvent(QMouseEvent *event) override;
+	void enterEvent(QEnterEvent *event) override;
+	void leaveEvent(QEvent *event) override;
 
 private slots:
 	void onClicked();
 
 private:
+	QRect indicatorRect() const;
+	void refreshVisibility();
+
 	std::shared_ptr<ButtonConfig> buttonConfig;
+	bool showIndicator = false;
+	bool indicatorInteractive = false;
+	bool indicatorIsSplit = false;
+	bool collapsed = false;
+	bool actionValid = true;
+};
+
+// Floating panel holding a group's children.
+class OmniBarFlyout : public QWidget {
+	Q_OBJECT
+
+public:
+	OmniBarFlyout(Qt::Orientation orientation, bool grabInput, QWidget *parent = nullptr);
+
+	void addButton(OmniBarButton *button);
+	void applyStyle(const BarStyle &style);
+	void showNear(QWidget *anchor, Qt::ToolBarArea area);
+
+signals:
+	void hoverEntered();
+	void hoverLeft();
+	void dismissed();
+
+protected:
+	void enterEvent(QEnterEvent *event) override;
+	void leaveEvent(QEvent *event) override;
+	void hideEvent(QHideEvent *event) override;
+
+private:
+	QBoxLayout *contentLayout;
 };
 
 class OmniBar : public QToolBar {
@@ -68,17 +139,42 @@ private slots:
 	void onConfigureClicked();
 
 private:
+	struct GroupRuntime {
+		std::shared_ptr<ButtonConfig> config;
+		OmniBarButton *parentButton = nullptr;
+		QList<OmniBarButton *> childButtons;
+		// Inline groups collapse by hiding the toolbar actions rather
+		// than the widgets, so button validity and group collapse never
+		// fight over the same visibility flag.
+		QList<QAction *> childActions;
+		QPointer<OmniBarFlyout> flyout;
+		QTimer *hoverTimer = nullptr;
+		QElapsedTimer flyoutClosedAt;
+		bool expanded = false;
+	};
+
 	static OmniBar *instance;
 	static void onFrontendEvent(enum obs_frontend_event event, void *data);
 	void handleFrontendEvent(enum obs_frontend_event event);
 
 	void clearButtons();
 	void createButtonsFromConfig();
-	QIcon getIconForButton(const std::shared_ptr<ButtonConfig> &config);
+	OmniBarButton *createButton(const std::shared_ptr<ButtonConfig> &config);
+	void buildGroup(GroupRuntime *group);
+	void connectGroupTriggers(GroupRuntime *group);
+	void setGroupExpanded(GroupRuntime *group, bool expanded);
+	void startHoverCollapse(GroupRuntime *group);
+	void cancelHoverCollapse(GroupRuntime *group);
+	void applyStyleToBar();
+	Qt::ToolBarArea currentArea() const;
 	void scheduleUpdate();
 
 	QList<OmniBarButton *> buttons;
-	QHash<QString, OmniBarButton *> buttonMap;
+	std::vector<std::unique_ptr<GroupRuntime>> groups;
+	QList<std::shared_ptr<ButtonConfig>> activeConfigs;
+	// QToolBar::clear() only detaches actions, so the widget actions this bar
+	// creates are tracked and destroyed explicitly on rebuild.
+	QList<QAction *> barActions;
 	QTimer *updateTimer;
 	QMenu *contextMenu;
 	QMainWindow *mainWindow = nullptr;
