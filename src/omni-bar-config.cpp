@@ -39,6 +39,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QDropEvent>
 #include <QHeaderView>
 #include <QUuid>
+#include <QStandardItemModel>
 
 static const int kConfigIdRole = Qt::UserRole;
 static const int kConfigIsGroupRole = Qt::UserRole + 1;
@@ -174,13 +175,20 @@ ButtonEditDialog::ButtonEditDialog(std::shared_ptr<ButtonConfig> config, const B
 	  buttonConfig(config),
 	  style(barStyle),
 	  allowGroup(groupAllowed),
-	  spacerMode(config && config->isSpacer())
+	  spacerMode(config && config->isSpacer()),
+	  dividerMode(config && config->isDivider())
 {
-	setWindowTitle(spacerMode ? obs_module_text("OmniBar.Settings.EditSpacer")
-				  : obs_module_text("OmniBar.Settings.EditButton"));
+	if (spacerMode)
+		setWindowTitle(obs_module_text("OmniBar.Settings.EditSpacer"));
+	else if (dividerMode)
+		setWindowTitle(obs_module_text("OmniBar.Settings.EditDivider"));
+	else
+		setWindowTitle(obs_module_text("OmniBar.Settings.EditButton"));
 
 	if (spacerMode) {
 		setupSpacerUI();
+	} else if (dividerMode) {
+		setupDividerUI();
 	} else {
 		setupUI();
 		populateSources();
@@ -195,6 +203,106 @@ ButtonEditDialog::ButtonEditDialog(std::shared_ptr<ButtonConfig> config, const B
 		onGroupToggled(groupCheck->isChecked());
 
 	refreshPreview();
+}
+
+void ButtonEditDialog::setupDividerUI()
+{
+	setMinimumWidth(420);
+
+	QVBoxLayout *mainLayout = new QVBoxLayout(this);
+
+	// A divider is small enough that seeing it beats describing it.
+	QWidget *backdrop = new QWidget();
+	backdrop->setObjectName("OmniBarPreviewBackdrop");
+	backdrop->setStyleSheet(style.panelStyleSheet(QStringLiteral("OmniBarPreviewBackdrop")));
+	QHBoxLayout *backdropLayout = new QHBoxLayout(backdrop);
+	backdropLayout->setContentsMargins(12, 12, 12, 12);
+	backdropLayout->setAlignment(Qt::AlignCenter);
+
+	dividerPreviewConfig = std::make_shared<ButtonConfig>();
+	dividerPreviewConfig->action = std::make_unique<DividerAction>();
+	dividerPreview = new OmniBarDivider(dividerPreviewConfig, Qt::Horizontal, style, backdrop);
+	backdropLayout->addWidget(dividerPreview);
+	mainLayout->addWidget(backdrop);
+
+	QFormLayout *form = new QFormLayout();
+
+	dividerThicknessSpin = new QSpinBox();
+	dividerThicknessSpin->setRange(1, 6);
+	dividerThicknessSpin->setValue(1);
+	dividerThicknessSpin->setSuffix(" px");
+	connect(dividerThicknessSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
+		&ButtonEditDialog::onDividerValueChanged);
+	form->addRow(obs_module_text("OmniBar.Settings.DividerThickness"), dividerThicknessSpin);
+
+	dividerLengthSpin = new QSpinBox();
+	dividerLengthSpin->setRange(10, 100);
+	dividerLengthSpin->setValue(70);
+	dividerLengthSpin->setSuffix(" %");
+	connect(dividerLengthSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
+		&ButtonEditDialog::onDividerValueChanged);
+	form->addRow(obs_module_text("OmniBar.Settings.DividerLength"), dividerLengthSpin);
+
+	QHBoxLayout *colorLayout = new QHBoxLayout();
+	dividerColorCheck = new QCheckBox(obs_module_text("OmniBar.Settings.UseCustomColor"));
+	connect(dividerColorCheck, &QCheckBox::toggled, this, [this](bool enabled) {
+		if (enabled && !dividerColor.isValid())
+			dividerColor = style.effectiveButtonBorder();
+		dividerColorButton->setEnabled(enabled);
+		setColorSwatch(dividerColorButton, enabled ? dividerColor : QColor());
+		onDividerValueChanged();
+	});
+	colorLayout->addWidget(dividerColorCheck);
+
+	dividerColorButton = new QPushButton();
+	dividerColorButton->setEnabled(false);
+	connect(dividerColorButton, &QPushButton::clicked, this, &ButtonEditDialog::onDividerColorClicked);
+	colorLayout->addWidget(dividerColorButton, 1);
+	form->addRow(obs_module_text("OmniBar.Settings.DividerColor"), colorLayout);
+
+	mainLayout->addLayout(form);
+
+	QLabel *hint = new QLabel(obs_module_text("OmniBar.Settings.DividerHint"));
+	hint->setWordWrap(true);
+	mainLayout->addWidget(hint);
+	mainLayout->addStretch();
+
+	QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+	connect(buttonBox, &QDialogButtonBox::accepted, this, &ButtonEditDialog::onOk);
+	connect(buttonBox, &QDialogButtonBox::rejected, this, &ButtonEditDialog::onCancel);
+	mainLayout->addWidget(buttonBox);
+}
+
+void ButtonEditDialog::onDividerValueChanged()
+{
+	if (!dividerPreview || !dividerPreviewConfig)
+		return;
+
+	auto *divider = dynamic_cast<DividerAction *>(dividerPreviewConfig->action.get());
+	if (!divider)
+		return;
+
+	divider->setThickness(dividerThicknessSpin->value());
+	divider->setLengthPercent(dividerLengthSpin->value());
+	if (dividerColorCheck->isChecked() && dividerColor.isValid())
+		divider->setCustomColor(dividerColor);
+	else
+		divider->clearCustomColor();
+
+	dividerPreview->applyStyle(Qt::Horizontal, style);
+}
+
+void ButtonEditDialog::onDividerColorClicked()
+{
+	QColor initial = dividerColor.isValid() ? dividerColor : style.effectiveButtonBorder();
+	QColor chosen = QColorDialog::getColor(initial, this, obs_module_text("OmniBar.Settings.DividerColor"),
+					       QColorDialog::ShowAlphaChannel);
+	if (!chosen.isValid())
+		return;
+
+	dividerColor = chosen;
+	setColorSwatch(dividerColorButton, dividerColor);
+	onDividerValueChanged();
 }
 
 ButtonEditDialog::~ButtonEditDialog() {}
@@ -264,6 +372,82 @@ void ButtonEditDialog::setupUI()
 	mainLayout->addWidget(buttonBox);
 }
 
+// The built-in set is large enough that a flat list is hard to scan, so it is
+// broken up by unselectable section headers with each entry showing its glyph.
+void ButtonEditDialog::buildIconCombo()
+{
+	QStandardItemModel *model = new QStandardItemModel(iconCombo);
+	QColor tint = palette().color(QPalette::Text);
+
+	auto addHeader = [&](const char *labelKey) {
+		QStandardItem *item = new QStandardItem(obs_module_text(labelKey));
+		item->setFlags(Qt::NoItemFlags);
+		QFont font = item->font();
+		font.setBold(true);
+		item->setFont(font);
+		model->appendRow(item);
+	};
+
+	auto addEntry = [&](const char *labelKey, const QString &file, bool withThumbnail) {
+		QStandardItem *item = new QStandardItem(obs_module_text(labelKey));
+		item->setData(file, Qt::UserRole);
+		if (withThumbnail) {
+			auto sample = std::make_shared<ButtonConfig>();
+			sample->iconPath = file;
+			sample->action = std::make_unique<NoAction>();
+			item->setIcon(omniBarIconForConfig(sample, tint, 16));
+		}
+		model->appendRow(item);
+	};
+
+	addEntry("OmniBar.Icon.Auto", QString(), false);
+
+	addHeader("OmniBar.IconGroup.Streaming");
+	addEntry("OmniBar.Icon.Stream", "stream.svg", true);
+	addEntry("OmniBar.Icon.StreamStart", "stream-start.svg", true);
+	addEntry("OmniBar.Icon.StreamStop", "stream-stop.svg", true);
+
+	addHeader("OmniBar.IconGroup.Recording");
+	addEntry("OmniBar.Icon.Record", "record.svg", true);
+	addEntry("OmniBar.Icon.RecordStart", "record-start.svg", true);
+	addEntry("OmniBar.Icon.RecordStop", "record-stop.svg", true);
+	addEntry("OmniBar.Icon.PauseToggle", "pause-toggle.svg", true);
+	addEntry("OmniBar.Icon.Pause", "pause.svg", true);
+	addEntry("OmniBar.Icon.Play", "play.svg", true);
+
+	addHeader("OmniBar.IconGroup.Replay");
+	addEntry("OmniBar.Icon.Replay", "replay.svg", true);
+	addEntry("OmniBar.Icon.ReplayStart", "replay-start.svg", true);
+	addEntry("OmniBar.Icon.ReplayStop", "replay-stop.svg", true);
+	addEntry("OmniBar.Icon.SaveReplay", "save-replay.svg", true);
+
+	addHeader("OmniBar.IconGroup.Camera");
+	addEntry("OmniBar.Icon.VirtualCam", "virtual-cam.svg", true);
+	addEntry("OmniBar.Icon.VirtualCamStart", "virtual-cam-start.svg", true);
+	addEntry("OmniBar.Icon.VirtualCamStop", "virtual-cam-stop.svg", true);
+
+	addHeader("OmniBar.IconGroup.Studio");
+	addEntry("OmniBar.Icon.StudioMode", "studio-mode.svg", true);
+	addEntry("OmniBar.Icon.StudioModeOn", "studio-mode-on.svg", true);
+	addEntry("OmniBar.Icon.StudioModeOff", "studio-mode-off.svg", true);
+	addEntry("OmniBar.Icon.Transition", "transition.svg", true);
+
+	addHeader("OmniBar.IconGroup.Sources");
+	addEntry("OmniBar.Icon.Visibility", "visibility.svg", true);
+	addEntry("OmniBar.Icon.Filter", "filter.svg", true);
+	addEntry("OmniBar.Icon.Hotkey", "hotkey.svg", true);
+
+	addHeader("OmniBar.IconGroup.Other");
+	addEntry("OmniBar.Icon.Group", "group.svg", true);
+	addEntry("OmniBar.Icon.None", "none.svg", true);
+	addEntry("OmniBar.Icon.Divider", "divider.svg", true);
+	addEntry("OmniBar.Icon.Spacer", "spacer.svg", true);
+	addEntry("OmniBar.Icon.Custom", "custom", false);
+
+	iconCombo->setModel(model);
+	iconCombo->setIconSize(QSize(16, 16));
+}
+
 QWidget *ButtonEditDialog::createAppearanceTab()
 {
 	QWidget *page = new QWidget();
@@ -294,18 +478,7 @@ QWidget *ButtonEditDialog::createAppearanceTab()
 	// Icon selection
 	QHBoxLayout *iconLayout = new QHBoxLayout();
 	iconCombo = new QComboBox();
-	iconCombo->addItem(obs_module_text("OmniBar.Icon.Auto"), "");
-	iconCombo->addItem(obs_module_text("OmniBar.Icon.Stream"), "stream.svg");
-	iconCombo->addItem(obs_module_text("OmniBar.Icon.Record"), "record.svg");
-	iconCombo->addItem(obs_module_text("OmniBar.Icon.Pause"), "pause.svg");
-	iconCombo->addItem(obs_module_text("OmniBar.Icon.Replay"), "replay.svg");
-	iconCombo->addItem(obs_module_text("OmniBar.Icon.SaveReplay"), "save-replay.svg");
-	iconCombo->addItem(obs_module_text("OmniBar.Icon.VirtualCam"), "virtual-cam.svg");
-	iconCombo->addItem(obs_module_text("OmniBar.Icon.StudioMode"), "studio-mode.svg");
-	iconCombo->addItem(obs_module_text("OmniBar.Icon.Visibility"), "visibility.svg");
-	iconCombo->addItem(obs_module_text("OmniBar.Icon.Filter"), "filter.svg");
-	iconCombo->addItem(obs_module_text("OmniBar.Icon.Hotkey"), "hotkey.svg");
-	iconCombo->addItem(obs_module_text("OmniBar.Icon.Custom"), "custom");
+	buildIconCombo();
 	connect(iconCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &ButtonEditDialog::onIconChanged);
 	iconLayout->addWidget(iconCombo, 1);
 
@@ -321,6 +494,14 @@ QWidget *ButtonEditDialog::createAppearanceTab()
 	iconLayout->addWidget(iconPreview);
 
 	form->addRow(obs_module_text("OmniBar.Settings.Icon"), iconLayout);
+
+	// Bundled icons always follow the bar's text colour; a custom file is
+	// left alone unless the user asks for it to be tinted.
+	tintIconCheck = new QCheckBox(obs_module_text("OmniBar.Settings.TintIcon"));
+	tintIconCheck->setToolTip(obs_module_text("OmniBar.Settings.TintIconHint"));
+	connect(tintIconCheck, &QCheckBox::toggled, this, &ButtonEditDialog::refreshPreview);
+	connect(tintIconCheck, &QCheckBox::toggled, this, &ButtonEditDialog::updateIconPreview);
+	form->addRow(QString(), tintIconCheck);
 
 	// Per-button accent override
 	QHBoxLayout *colorLayout = new QHBoxLayout();
@@ -526,6 +707,20 @@ void ButtonEditDialog::populateFromConfig()
 		return;
 	}
 
+	if (dividerMode) {
+		auto *divider = dynamic_cast<DividerAction *>(buttonConfig->action.get());
+		if (divider) {
+			dividerThicknessSpin->setValue(divider->getThickness());
+			dividerLengthSpin->setValue(divider->getLengthPercent());
+			dividerColor = divider->getCustomColor();
+			dividerColorCheck->setChecked(divider->hasCustomColor());
+			dividerColorButton->setEnabled(divider->hasCustomColor());
+			setColorSwatch(dividerColorButton, divider->hasCustomColor() ? dividerColor : QColor());
+		}
+		onDividerValueChanged();
+		return;
+	}
+
 	labelEdit->setText(buttonConfig->label);
 	tooltipEdit->setText(buttonConfig->tooltip);
 
@@ -539,12 +734,16 @@ void ButtonEditDialog::populateFromConfig()
 
 	// Icon: a bundled icon matches an entry by name, anything else is custom.
 	int iconIndex = iconCombo->findData(buttonConfig->iconPath);
-	if (iconIndex >= 0) {
-		iconCombo->setCurrentIndex(iconIndex);
-	} else {
+	bool isCustom = iconIndex < 0;
+	if (isCustom) {
 		customIconPath = buttonConfig->iconPath;
-		iconCombo->setCurrentIndex(iconCombo->count() - 1);
+		iconCombo->setCurrentIndex(iconCombo->findData("custom"));
+	} else {
+		iconCombo->setCurrentIndex(iconIndex);
 	}
+
+	tintIconCheck->setChecked(buttonConfig->tintIcon);
+	tintIconCheck->setEnabled(isCustom);
 	updateIconPreview();
 
 	if (allowGroup) {
@@ -627,6 +826,7 @@ void ButtonEditDialog::populateFromConfig()
 	}
 	case ActionType::None:
 	case ActionType::Spacer:
+	case ActionType::Divider:
 		break;
 	}
 }
@@ -638,9 +838,19 @@ void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
 		return;
 	}
 
+	if (dividerMode) {
+		auto divider =
+			std::make_unique<DividerAction>(dividerThicknessSpin->value(), dividerLengthSpin->value());
+		if (dividerColorCheck->isChecked() && dividerColor.isValid())
+			divider->setCustomColor(dividerColor);
+		target.action = std::move(divider);
+		return;
+	}
+
 	target.label = labelEdit->text();
 	target.tooltip = tooltipEdit->text();
 	target.displayMode = static_cast<ButtonDisplayMode>(displayModeCombo->currentData().toInt());
+	target.tintIcon = tintIconCheck->isChecked();
 
 	target.useCustomColor = customColorCheck->isChecked() && customColor.isValid();
 	target.customColor = customColor;
@@ -686,6 +896,9 @@ void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
 	case ActionType::Spacer:
 		target.action = std::make_unique<SpacerAction>(10);
 		break;
+	case ActionType::Divider:
+		target.action = std::make_unique<DividerAction>();
+		break;
 	}
 }
 
@@ -715,27 +928,19 @@ void ButtonEditDialog::onActionTypeChanged(int index)
 void ButtonEditDialog::onIconChanged(int index)
 {
 	Q_UNUSED(index);
+
+	// Tinting only means anything for a file the plugin did not draw.
+	tintIconCheck->setEnabled(iconCombo->currentData().toString() == "custom");
+
 	updateIconPreview();
 	refreshPreview();
 }
 
 void ButtonEditDialog::updateIconPreview()
 {
-	auto config = std::make_shared<ButtonConfig>();
-	QString iconData = iconCombo->currentData().toString();
-	config->iconPath = iconData == "custom" ? customIconPath : iconData;
-
-	// Keep the action around so an automatic icon resolves the same way the
-	// bar would resolve it.
-	if (actionTypeCombo) {
-		ActionType type = static_cast<ActionType>(actionTypeCombo->currentData().toInt());
-		if (type == ActionType::Frontend && frontendActionCombo) {
-			config->action = std::make_unique<FrontendAction>(FrontendAction::getFrontendActionFromName(
-				frontendActionCombo->currentData().toString()));
-		}
-	}
-
-	QIcon icon = omniBarIconForConfig(config);
+	// Resolved through the working config so an automatic icon picks the same
+	// glyph the bar would, and tinting matches the dialog's own text colour.
+	QIcon icon = omniBarIconForConfig(previewConfig(), palette().color(QPalette::Text), 24);
 	if (icon.isNull()) {
 		iconPreview->clear();
 		return;
@@ -751,7 +956,7 @@ void ButtonEditDialog::onIconBrowse()
 		return;
 
 	customIconPath = file;
-	iconCombo->setCurrentIndex(iconCombo->count() - 1); // Custom
+	iconCombo->setCurrentIndex(iconCombo->findData("custom"));
 	updateIconPreview();
 	refreshPreview();
 }
@@ -807,7 +1012,7 @@ void ButtonEditDialog::populateChildList()
 		if (!child)
 			continue;
 		QListWidgetItem *item = new QListWidgetItem(child->displayText());
-		item->setIcon(omniBarIconForConfig(child));
+		item->setIcon(omniBarIconForConfig(child, palette().color(QPalette::Text), 16));
 		childList->addItem(item);
 	}
 }
@@ -1325,7 +1530,7 @@ QTreeWidgetItem *OmniBarConfig::createTreeItem(const std::shared_ptr<ButtonConfi
 	QTreeWidgetItem *item = new QTreeWidgetItem();
 	item->setText(0, config->displayText());
 	item->setText(1, config->summaryText());
-	item->setIcon(0, omniBarIconForConfig(config));
+	item->setIcon(0, omniBarIconForConfig(config, palette().color(QPalette::Text), 16));
 	item->setData(0, kConfigIdRole, config->id);
 	item->setData(0, kConfigIsGroupRole, config->isGroup);
 
@@ -1435,7 +1640,7 @@ void OmniBarConfig::addNewEntry(std::shared_ptr<ButtonConfig> config)
 	QTreeWidgetItem *current = buttonTree->currentItem();
 	auto currentConfig = configForItem(current);
 
-	if (current && current->parent() && !config->isGroup && !config->isSpacer()) {
+	if (current && current->parent() && !config->isGroup && !config->isDecoration()) {
 		auto parentConfig = configForItem(current->parent());
 		if (parentConfig) {
 			int row = parentConfig->children.indexOf(currentConfig);
@@ -1456,6 +1661,7 @@ void OmniBarConfig::onAddButton()
 	QAction *buttonAction = menu.addAction(obs_module_text("OmniBar.Settings.AddPlainButton"));
 	QAction *groupAction = menu.addAction(obs_module_text("OmniBar.Settings.AddGroup"));
 	QAction *spacerAction = menu.addAction(obs_module_text("OmniBar.Settings.AddSpacer"));
+	QAction *dividerAction = menu.addAction(obs_module_text("OmniBar.Settings.AddDivider"));
 
 	QAction *chosen = menu.exec(addButton->mapToGlobal(QPoint(0, addButton->height())));
 	if (!chosen)
@@ -1463,8 +1669,12 @@ void OmniBarConfig::onAddButton()
 
 	auto config = std::make_shared<ButtonConfig>();
 
-	if (chosen == spacerAction) {
-		config->action = std::make_unique<SpacerAction>(10);
+	if (chosen == spacerAction || chosen == dividerAction) {
+		if (chosen == spacerAction)
+			config->action = std::make_unique<SpacerAction>(10);
+		else
+			config->action = std::make_unique<DividerAction>();
+
 		ButtonEditDialog dialog(config, workingStyle, false, this);
 		if (dialog.exec() == QDialog::Accepted)
 			addNewEntry(config);

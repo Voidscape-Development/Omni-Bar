@@ -29,7 +29,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 // Forward declaration
 class ButtonConfig;
 
-enum class ActionType { None, Frontend, SourceHotkey, SourceFilter, SourceVisibility, Spacer };
+enum class ActionType { None, Frontend, SourceHotkey, SourceFilter, SourceVisibility, Spacer, Divider };
 
 enum class FrontendActionType {
 	StartStreaming,
@@ -190,6 +190,44 @@ private:
 	int spacerWidth;
 };
 
+// A line drawn across the bar to visually separate neighbouring buttons.
+class DividerAction : public ButtonAction {
+public:
+	DividerAction(int thickness = 1, int lengthPercent = 70);
+
+	ActionType getType() const override { return ActionType::Divider; }
+	void execute() override {}
+	QString getDisplayName() const override;
+	obs_data_t *serialize() const override;
+
+	int getThickness() const { return thickness; }
+	void setThickness(int value) { thickness = value; }
+
+	// Length of the line across the bar, as a percentage of the bar's
+	// thickness, so it can be inset from the edges.
+	int getLengthPercent() const { return lengthPercent; }
+	void setLengthPercent(int value) { lengthPercent = value; }
+
+	bool hasCustomColor() const { return useCustomColor && color.isValid(); }
+	QColor getCustomColor() const { return color; }
+	void setCustomColor(const QColor &value)
+	{
+		color = value;
+		useCustomColor = value.isValid();
+	}
+	void clearCustomColor()
+	{
+		useCustomColor = false;
+		color = QColor();
+	}
+
+private:
+	int thickness;
+	int lengthPercent;
+	bool useCustomColor = false;
+	QColor color;
+};
+
 // Button configuration class
 class ButtonConfig {
 public:
@@ -202,6 +240,11 @@ public:
 	std::unique_ptr<ButtonAction> action;
 
 	ButtonDisplayMode displayMode = ButtonDisplayMode::IconOnly;
+
+	// Recolour a user-supplied icon to match the bar. Bundled icons always
+	// follow the bar; a custom file is drawn as authored unless this is set,
+	// since recolouring would ruin a deliberately coloured graphic.
+	bool tintIcon = false;
 
 	// Per-button accent override for the hover/active states.
 	bool useCustomColor = false;
@@ -219,6 +262,10 @@ public:
 
 	bool isValid() const;
 	bool isSpacer() const;
+	bool isDivider() const;
+
+	// True for entries that are bar decoration rather than a button.
+	bool isDecoration() const;
 
 	// True when the button runs something of its own, as opposed to a group
 	// that only opens and closes.

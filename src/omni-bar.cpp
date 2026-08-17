@@ -32,6 +32,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QMouseEvent>
 #include <QBoxLayout>
 #include <QScreen>
+#include <QBuffer>
+#include <QImageReader>
+#include <QHash>
 
 OmniBar *OmniBar::instance = nullptr;
 
@@ -50,30 +53,73 @@ static QString moduleFilePath(const QString &relativePath)
 	return QFile::exists(fullPath) ? fullPath : QString();
 }
 
-// Locate a bundled icon, preferring the variant matching the current theme.
+// Locate a bundled icon by file name.
 static QString findBundledIcon(const QString &name)
 {
 	if (name.isEmpty())
 		return QString();
 
-	QStringList candidates;
-	int dotIndex = name.lastIndexOf('.');
-	if (dotIndex > 0 && !name.contains("_dark.") && !name.contains("_light.")) {
-		QString suffix = omniBarIsDarkTheme() ? "_dark" : "_light";
-		candidates << name.left(dotIndex) + suffix + name.mid(dotIndex);
-	}
-	candidates << name;
+	// Icons used to ship as _dark/_light pairs. Configurations written back
+	// then name one of those variants, which no longer exist.
+	QString base = name;
+	base.replace(QLatin1String("_dark."), QLatin1String("."));
+	base.replace(QLatin1String("_light."), QLatin1String("."));
 
-	for (const QString &candidate : candidates) {
-		QString path = moduleFilePath(candidate);
-		if (!path.isEmpty())
-			return path;
-		path = moduleFilePath(QString("icons/%1").arg(candidate));
-		if (!path.isEmpty())
-			return path;
+	QString path = moduleFilePath(QString("icons/%1").arg(base));
+	if (!path.isEmpty())
+		return path;
+
+	return moduleFilePath(base);
+}
+
+// Bundled icons are drawn with a currentColor token. Qt's SVG renderer does not
+// resolve it, so it is substituted before the bytes reach the image plugin -
+// which also lets one file serve every theme and custom text colour.
+static QIcon loadIcon(const QString &path, const QColor &tint, int size, bool recolor)
+{
+	if (path.isEmpty())
+		return QIcon();
+
+	if (!recolor || !path.endsWith(QLatin1String(".svg"), Qt::CaseInsensitive) || !tint.isValid())
+		return QIcon(path);
+
+	qreal ratio = qApp ? qApp->devicePixelRatio() : 1.0;
+	int pixels = qMax(1, qRound(size * ratio));
+
+	static QHash<QString, QIcon> cache;
+	QString key = QString("%1|%2|%3").arg(path, tint.name(QColor::HexArgb)).arg(pixels);
+	auto cached = cache.constFind(key);
+	if (cached != cache.constEnd())
+		return *cached;
+
+	QIcon icon;
+	QFile file(path);
+	if (file.open(QIODevice::ReadOnly)) {
+		QByteArray data = file.readAll();
+		data.replace("currentColor", tint.name(QColor::HexRgb).toUtf8());
+
+		QBuffer buffer(&data);
+		QImageReader reader(&buffer, "svg");
+		reader.setScaledSize(QSize(pixels, pixels));
+
+		QImage image = reader.read();
+		if (!image.isNull()) {
+			QPixmap pixmap = QPixmap::fromImage(image);
+			pixmap.setDevicePixelRatio(ratio);
+			icon = QIcon(pixmap);
+		}
 	}
 
-	return QString();
+	// If anything above failed, let Qt load the file untouched.
+	if (icon.isNull())
+		icon = QIcon(path);
+
+	// Dragging the icon-size spin box would otherwise grow this without end.
+	if (cache.size() > 256)
+		cache.clear();
+	cache.insert(key, icon);
+
+	return icon;
 }
 
 // Bundled icon name to fall back on when a button has none of its own.
@@ -88,34 +134,49 @@ static QString defaultIconName(const std::shared_ptr<ButtonConfig> &config)
 		if (!frontendAction)
 			return QString();
 
+		// Start, stop and toggle each get their own glyph, so two buttons
+		// from the same family never look identical.
 		switch (frontendAction->getActionType()) {
 		case FrontendActionType::ToggleStreaming:
-		case FrontendActionType::StartStreaming:
-		case FrontendActionType::StopStreaming:
 			return "stream.svg";
+		case FrontendActionType::StartStreaming:
+			return "stream-start.svg";
+		case FrontendActionType::StopStreaming:
+			return "stream-stop.svg";
 		case FrontendActionType::ToggleRecording:
-		case FrontendActionType::StartRecording:
-		case FrontendActionType::StopRecording:
 			return "record.svg";
+		case FrontendActionType::StartRecording:
+			return "record-start.svg";
+		case FrontendActionType::StopRecording:
+			return "record-stop.svg";
 		case FrontendActionType::TogglePauseRecording:
+			return "pause-toggle.svg";
 		case FrontendActionType::PauseRecording:
-		case FrontendActionType::UnpauseRecording:
 			return "pause.svg";
+		case FrontendActionType::UnpauseRecording:
+			return "play.svg";
 		case FrontendActionType::ToggleReplayBuffer:
-		case FrontendActionType::StartReplayBuffer:
-		case FrontendActionType::StopReplayBuffer:
 			return "replay.svg";
+		case FrontendActionType::StartReplayBuffer:
+			return "replay-start.svg";
+		case FrontendActionType::StopReplayBuffer:
+			return "replay-stop.svg";
 		case FrontendActionType::SaveReplayBuffer:
 			return "save-replay.svg";
 		case FrontendActionType::ToggleVirtualCam:
-		case FrontendActionType::StartVirtualCam:
-		case FrontendActionType::StopVirtualCam:
 			return "virtual-cam.svg";
+		case FrontendActionType::StartVirtualCam:
+			return "virtual-cam-start.svg";
+		case FrontendActionType::StopVirtualCam:
+			return "virtual-cam-stop.svg";
 		case FrontendActionType::ToggleStudioMode:
-		case FrontendActionType::EnableStudioMode:
-		case FrontendActionType::DisableStudioMode:
-		case FrontendActionType::TransitionToProgram:
 			return "studio-mode.svg";
+		case FrontendActionType::EnableStudioMode:
+			return "studio-mode-on.svg";
+		case FrontendActionType::DisableStudioMode:
+			return "studio-mode-off.svg";
+		case FrontendActionType::TransitionToProgram:
+			return "transition.svg";
 		}
 		return QString();
 	}
@@ -127,14 +188,17 @@ static QString defaultIconName(const std::shared_ptr<ButtonConfig> &config)
 		return "hotkey.svg";
 	case ActionType::Spacer:
 		return "spacer.svg";
+	case ActionType::Divider:
+		return "divider.svg";
 	case ActionType::None:
-		return QString();
+		// A container-only group reads better as a group than as nothing.
+		return config->isGroup ? "group.svg" : "none.svg";
 	}
 
 	return QString();
 }
 
-QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config)
+QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config, const QColor &tint, int size)
 {
 	if (!config)
 		return QIcon();
@@ -146,16 +210,16 @@ QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config)
 	if (!iconPath.isEmpty()) {
 		if (iconPath.contains('/') || iconPath.contains('\\')) {
 			if (QFile::exists(iconPath))
-				return QIcon(iconPath);
+				return loadIcon(iconPath, tint, size, config->tintIcon);
 		} else {
 			QString bundled = findBundledIcon(iconPath);
 			if (!bundled.isEmpty())
-				return QIcon(bundled);
+				return loadIcon(bundled, tint, size, true);
 		}
 	}
 
 	QString fallback = findBundledIcon(defaultIconName(config));
-	return fallback.isEmpty() ? QIcon() : QIcon(fallback);
+	return fallback.isEmpty() ? QIcon() : loadIcon(fallback, tint, size, true);
 }
 
 void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_ptr<ButtonConfig> &config,
@@ -164,7 +228,7 @@ void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_ptr<But
 	if (!button || !config)
 		return;
 
-	button->setIcon(omniBarIconForConfig(config));
+	button->setIcon(omniBarIconForConfig(config, style.effectiveTextColor(), style.iconSize));
 	button->setIconSize(QSize(style.iconSize, style.iconSize));
 
 	QString label = config->label;
@@ -339,6 +403,62 @@ void OmniBarButton::leaveEvent(QEvent *event)
 }
 
 // ============================================================================
+// OmniBarDivider
+// ============================================================================
+
+OmniBarDivider::OmniBarDivider(std::shared_ptr<ButtonConfig> config, Qt::Orientation orientation, const BarStyle &style,
+			       QWidget *parent)
+	: QWidget(parent),
+	  dividerConfig(config)
+{
+	setAttribute(Qt::WA_TransparentForMouseEvents, true);
+	applyStyle(orientation, style);
+}
+
+void OmniBarDivider::applyStyle(Qt::Orientation orientation, const BarStyle &style)
+{
+	barOrientation = orientation;
+
+	auto *divider = dividerConfig ? dynamic_cast<DividerAction *>(dividerConfig->action.get()) : nullptr;
+	int thickness = divider ? divider->getThickness() : 1;
+
+	lineColor = divider && divider->hasCustomColor() ? divider->getCustomColor() : style.effectiveButtonBorder();
+
+	// Thin across the bar with the spacing repeated either side, and as long
+	// as a button along it.
+	int across = thickness + (style.spacing * 2);
+	int along = style.buttonExtent();
+
+	if (orientation == Qt::Horizontal)
+		setFixedSize(across, along);
+	else
+		setFixedSize(along, across);
+
+	update();
+}
+
+void OmniBarDivider::paintEvent(QPaintEvent *event)
+{
+	Q_UNUSED(event);
+
+	auto *divider = dividerConfig ? dynamic_cast<DividerAction *>(dividerConfig->action.get()) : nullptr;
+	int thickness = divider ? divider->getThickness() : 1;
+	int percent = divider ? divider->getLengthPercent() : 70;
+
+	QPainter painter(this);
+	painter.setPen(Qt::NoPen);
+	painter.setBrush(lineColor);
+
+	if (barOrientation == Qt::Horizontal) {
+		int length = qMax(2, height() * percent / 100);
+		painter.drawRect(QRect((width() - thickness) / 2, (height() - length) / 2, thickness, length));
+	} else {
+		int length = qMax(2, width() * percent / 100);
+		painter.drawRect(QRect((width() - length) / 2, (height() - thickness) / 2, length, thickness));
+	}
+}
+
+// ============================================================================
 // OmniBarFlyout
 // ============================================================================
 
@@ -449,6 +569,11 @@ OmniBar::OmniBar(QWidget *parent) : QToolBar(parent)
 	updateTimer->setSingleShot(true);
 	updateTimer->setInterval(50);
 	connect(updateTimer, &QTimer::timeout, this, &OmniBar::onUpdateTimer);
+
+	// Spacers and dividers are laid out along the bar, so they have to be
+	// rebuilt whenever it turns. The bar is built before it is docked, so
+	// this also covers the initial move into a left or right dock.
+	connect(this, &QToolBar::orientationChanged, this, &OmniBar::onOrientationChanged);
 
 	// Register frontend event callback
 	obs_frontend_add_event_callback(onFrontendEvent, this);
@@ -613,6 +738,12 @@ void OmniBar::createButtonsFromConfig()
 			continue;
 		}
 
+		if (config->isDivider()) {
+			auto *divider = new OmniBarDivider(config, orientation(), SettingsManager::getStyle(), this);
+			barActions.append(addWidget(divider));
+			continue;
+		}
+
 		OmniBarButton *button = createButton(config);
 		barActions.append(addWidget(button));
 		buttons.append(button);
@@ -646,7 +777,8 @@ void OmniBar::buildGroup(GroupRuntime *group)
 	}
 
 	for (const auto &childConfig : config->children) {
-		if (!childConfig || !childConfig->action)
+		// Groups hold buttons; bar decoration has no meaning inside one.
+		if (!childConfig || !childConfig->action || childConfig->isDecoration())
 			continue;
 
 		OmniBarButton *child = createButton(childConfig);
@@ -819,6 +951,12 @@ void OmniBar::onContextMenuRequested(const QPoint &pos)
 void OmniBar::onConfigureClicked()
 {
 	OmniBarConfig::showDialog();
+}
+
+void OmniBar::onOrientationChanged(Qt::Orientation orientation)
+{
+	Q_UNUSED(orientation);
+	rebuildToolbar();
 }
 
 void OmniBar::onFrontendEvent(enum obs_frontend_event event, void *data)

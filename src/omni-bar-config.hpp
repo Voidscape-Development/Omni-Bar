@@ -34,6 +34,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <memory>
 
 #include "bar-style.hpp"
+#include "omni-bar.hpp"
 
 class ButtonConfig;
 
@@ -89,6 +90,8 @@ private slots:
 	void onHotkeySourceChanged(const QString &sourceName);
 	void onSceneChanged(const QString &sceneName);
 	void onCustomColorClicked();
+	void onDividerColorClicked();
+	void onDividerValueChanged();
 	void onGroupToggled(bool enabled);
 	void onAddChild();
 	void onEditChild();
@@ -102,6 +105,8 @@ private slots:
 private:
 	void setupUI();
 	void setupSpacerUI();
+	void setupDividerUI();
+	void buildIconCombo();
 	QWidget *createAppearanceTab();
 	QWidget *createActionTab();
 	QWidget *createGroupTab();
@@ -125,8 +130,10 @@ private:
 	BarStyle style;
 	bool allowGroup;
 	bool spacerMode;
+	bool dividerMode;
 	QString customIconPath;
 	QColor customColor;
+	QColor dividerColor;
 	QList<std::shared_ptr<ButtonConfig>> workingChildren;
 
 	// Preview
@@ -140,6 +147,7 @@ private:
 	QComboBox *iconCombo = nullptr;
 	QPushButton *iconBrowseButton = nullptr;
 	QLabel *iconPreview = nullptr;
+	QCheckBox *tintIconCheck = nullptr;
 	QCheckBox *customColorCheck = nullptr;
 	QPushButton *customColorButton = nullptr;
 
@@ -154,6 +162,14 @@ private:
 	QComboBox *visibilitySceneCombo = nullptr;
 	QComboBox *visibilitySourceCombo = nullptr;
 	QSpinBox *spacerWidthSpin = nullptr;
+
+	// Divider
+	QSpinBox *dividerThicknessSpin = nullptr;
+	QSpinBox *dividerLengthSpin = nullptr;
+	QCheckBox *dividerColorCheck = nullptr;
+	QPushButton *dividerColorButton = nullptr;
+	OmniBarDivider *dividerPreview = nullptr;
+	std::shared_ptr<ButtonConfig> dividerPreviewConfig;
 
 	// Group
 	QCheckBox *groupCheck = nullptr;

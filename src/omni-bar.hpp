@@ -35,9 +35,9 @@ class ButtonConfig;
 class QMainWindow;
 class QBoxLayout;
 
-// Icon for a button, resolving themed variants and falling back to a sensible
-// default for the button's action type.
-QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config);
+// Icon for a button, recoloured to tint and rendered at size, falling back to a
+// sensible default for the button's action type.
+QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config, const QColor &tint, int size);
 
 // Apply a config's label, display mode, icon and colour override to a tool
 // button. Shared with the settings dialog so its preview matches the real bar.
@@ -91,6 +91,25 @@ private:
 	bool actionValid = true;
 };
 
+// A line across the bar, separating neighbouring buttons.
+class OmniBarDivider : public QWidget {
+	Q_OBJECT
+
+public:
+	OmniBarDivider(std::shared_ptr<ButtonConfig> config, Qt::Orientation barOrientation, const BarStyle &style,
+		       QWidget *parent = nullptr);
+
+	void applyStyle(Qt::Orientation barOrientation, const BarStyle &style);
+
+protected:
+	void paintEvent(QPaintEvent *event) override;
+
+private:
+	std::shared_ptr<ButtonConfig> dividerConfig;
+	Qt::Orientation barOrientation = Qt::Horizontal;
+	QColor lineColor;
+};
+
 // Floating panel holding a group's children.
 class OmniBarFlyout : public QWidget {
 	Q_OBJECT
@@ -137,6 +156,7 @@ private slots:
 	void onUpdateTimer();
 	void onContextMenuRequested(const QPoint &pos);
 	void onConfigureClicked();
+	void onOrientationChanged(Qt::Orientation orientation);
 
 private:
 	struct GroupRuntime {

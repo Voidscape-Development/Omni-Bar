@@ -55,6 +55,16 @@ std::unique_ptr<ButtonAction> ButtonAction::deserialize(obs_data_t *data)
 	} else if (type == "spacer") {
 		int width = static_cast<int>(obs_data_get_int(data, "width"));
 		return std::make_unique<SpacerAction>(width);
+	} else if (type == "divider") {
+		int thickness = static_cast<int>(obs_data_get_int(data, "thickness"));
+		int length = static_cast<int>(obs_data_get_int(data, "length_percent"));
+		auto divider = std::make_unique<DividerAction>(thickness > 0 ? thickness : 1, length > 0 ? length : 70);
+		if (obs_data_get_bool(data, "use_custom_color")) {
+			QColor color(QString::fromUtf8(obs_data_get_string(data, "color")));
+			if (color.isValid())
+				divider->setCustomColor(color);
+		}
+		return divider;
 	}
 
 	return nullptr;
@@ -558,6 +568,27 @@ obs_data_t *SpacerAction::serialize() const
 	return data;
 }
 
+// DividerAction implementation
+DividerAction::DividerAction(int lineThickness, int linePercent) : thickness(lineThickness), lengthPercent(linePercent)
+{
+}
+
+QString DividerAction::getDisplayName() const
+{
+	return QString::fromUtf8(obs_module_text("OmniBar.ActionType.Divider"));
+}
+
+obs_data_t *DividerAction::serialize() const
+{
+	obs_data_t *data = obs_data_create();
+	obs_data_set_string(data, "type", "divider");
+	obs_data_set_int(data, "thickness", thickness);
+	obs_data_set_int(data, "length_percent", lengthPercent);
+	obs_data_set_bool(data, "use_custom_color", hasCustomColor());
+	obs_data_set_string(data, "color", color.isValid() ? color.name(QColor::HexArgb).toUtf8().constData() : "");
+	return data;
+}
+
 // ButtonConfig implementation
 ButtonConfig::ButtonConfig()
 {
@@ -572,6 +603,7 @@ obs_data_t *ButtonConfig::serialize() const
 	obs_data_set_string(data, "tooltip", tooltip.toUtf8().constData());
 	obs_data_set_string(data, "icon", iconPath.toUtf8().constData());
 	obs_data_set_int(data, "display_mode", static_cast<int>(displayMode));
+	obs_data_set_bool(data, "tint_icon", tintIcon);
 	obs_data_set_bool(data, "use_custom_color", useCustomColor);
 	obs_data_set_string(data, "custom_color",
 			    customColor.isValid() ? customColor.name(QColor::HexArgb).toUtf8().constData() : "");
@@ -612,6 +644,7 @@ std::shared_ptr<ButtonConfig> ButtonConfig::deserialize(obs_data_t *data)
 	config->tooltip = QString::fromUtf8(obs_data_get_string(data, "tooltip"));
 	config->iconPath = QString::fromUtf8(obs_data_get_string(data, "icon"));
 	config->displayMode = static_cast<ButtonDisplayMode>(obs_data_get_int(data, "display_mode"));
+	config->tintIcon = obs_data_get_bool(data, "tint_icon");
 
 	config->useCustomColor = obs_data_get_bool(data, "use_custom_color");
 	QString colorName = QString::fromUtf8(obs_data_get_string(data, "custom_color"));
@@ -676,9 +709,19 @@ bool ButtonConfig::isSpacer() const
 	return action && action->getType() == ActionType::Spacer;
 }
 
+bool ButtonConfig::isDivider() const
+{
+	return action && action->getType() == ActionType::Divider;
+}
+
+bool ButtonConfig::isDecoration() const
+{
+	return isSpacer() || isDivider();
+}
+
 bool ButtonConfig::hasAction() const
 {
-	return action && action->getType() != ActionType::None && action->getType() != ActionType::Spacer;
+	return action && action->getType() != ActionType::None && !isDecoration();
 }
 
 bool ButtonConfig::isValid() const
@@ -719,6 +762,13 @@ QString ButtonConfig::summaryText() const
 	if (isSpacer()) {
 		auto *spacer = dynamic_cast<SpacerAction *>(action.get());
 		return QString("%1 px").arg(spacer ? spacer->getWidth() : 0);
+	}
+
+	if (isDivider()) {
+		auto *divider = dynamic_cast<DividerAction *>(action.get());
+		if (!divider)
+			return QString();
+		return QString("%1 px / %2 %").arg(divider->getThickness()).arg(divider->getLengthPercent());
 	}
 
 	if (isGroup) {
