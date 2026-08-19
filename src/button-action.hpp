@@ -99,8 +99,12 @@ public:
 	FrontendActionType getActionType() const { return actionType; }
 	void setActionType(FrontendActionType type) { actionType = type; }
 
+	// Stable identifier written to the configuration file.
 	static QString getFrontendActionName(FrontendActionType type);
 	static FrontendActionType getFrontendActionFromName(const QString &name);
+
+	// Translated name shown to the user.
+	static QString getFrontendActionLabel(FrontendActionType type);
 
 private:
 	FrontendActionType actionType;
@@ -129,8 +133,12 @@ private:
 	QString sourceName;
 	QString hotkeyName;
 	obs_hotkey_id hotkeyId = OBS_INVALID_HOTKEY_ID;
+	// Hotkeys are stored by internal name; the readable description is
+	// looked up once for display.
+	mutable QString cachedDescription;
 
 	void refreshHotkeyId();
+	QString hotkeyDescription() const;
 };
 
 class SourceFilterAction : public ButtonAction {

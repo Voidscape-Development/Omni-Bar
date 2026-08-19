@@ -38,6 +38,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QFile>
 #include <QDropEvent>
 #include <QHeaderView>
+#include <QAbstractItemView>
 #include <QUuid>
 #include <QStandardItemModel>
 
@@ -53,6 +54,14 @@ static void setColorSwatch(QPushButton *button, const QColor &color)
 	if (!color.isValid()) {
 		button->setStyleSheet(QString());
 		button->setText(obs_module_text("OmniBar.Style.NoColor"));
+		return;
+	}
+
+	// A fully transparent colour painted solid would read as black, which is
+	// the opposite of what it means.
+	if (color.alpha() == 0) {
+		button->setStyleSheet(QString());
+		button->setText(obs_module_text("OmniBar.Style.Transparent"));
 		return;
 	}
 
@@ -207,11 +216,15 @@ ButtonEditDialog::ButtonEditDialog(std::shared_ptr<ButtonConfig> config, const B
 		onGroupToggled(groupCheck->isChecked());
 
 	refreshPreview();
+
+	// Open at the size the content asks for; the minimum above only governs
+	// how far the user can shrink it.
+	adjustSize();
 }
 
 void ButtonEditDialog::setupDividerUI()
 {
-	setMinimumWidth(420);
+	setMinimumWidth(360);
 
 	QVBoxLayout *mainLayout = new QVBoxLayout(this);
 
@@ -313,7 +326,7 @@ ButtonEditDialog::~ButtonEditDialog() {}
 
 void ButtonEditDialog::setupSpacerUI()
 {
-	setMinimumWidth(360);
+	setMinimumWidth(340);
 
 	QVBoxLayout *mainLayout = new QVBoxLayout(this);
 
@@ -338,7 +351,9 @@ void ButtonEditDialog::setupSpacerUI()
 
 void ButtonEditDialog::setupUI()
 {
-	setMinimumSize(720, 480);
+	// Sized from its content rather than a fixed floor, so the tabs are not
+	// padded out with empty space.
+	setMinimumSize(600, 400);
 
 	QVBoxLayout *mainLayout = new QVBoxLayout(this);
 	QHBoxLayout *panes = new QHBoxLayout();
@@ -349,7 +364,7 @@ void ButtonEditDialog::setupUI()
 	leftPane->addWidget(previewLabel);
 
 	preview = new ButtonPreview();
-	preview->setFixedWidth(220);
+	preview->setFixedWidth(190);
 	leftPane->addWidget(preview);
 
 	previewActiveCheck = new QCheckBox(obs_module_text("OmniBar.Settings.PreviewActive"));
@@ -450,6 +465,9 @@ void ButtonEditDialog::buildIconCombo()
 
 	iconCombo->setModel(model);
 	iconCombo->setIconSize(QSize(16, 16));
+	// The popup would otherwise inherit the combo's width and elide the
+	// longer entries.
+	iconCombo->view()->setMinimumWidth(260);
 }
 
 QWidget *ButtonEditDialog::createAppearanceTab()
@@ -677,6 +695,7 @@ QWidget *ButtonEditDialog::createGroupTab()
 
 	childList = new QListWidget();
 	childList->setSelectionMode(QAbstractItemView::SingleSelection);
+	childList->setMinimumHeight(120);
 	connect(childList, &QListWidget::itemDoubleClicked, this, &ButtonEditDialog::onChildDoubleClicked);
 	settingsLayout->addWidget(childList, 1);
 
@@ -1284,9 +1303,10 @@ OmniBarConfig *OmniBarConfig::instance = nullptr;
 OmniBarConfig::OmniBarConfig(QWidget *parent) : QDialog(parent)
 {
 	setWindowTitle(obs_module_text("OmniBar.Settings.Title"));
-	setMinimumSize(640, 560);
+	setMinimumSize(560, 520);
 	setupUI();
 	loadSettings();
+	adjustSize();
 }
 
 OmniBarConfig::~OmniBarConfig()

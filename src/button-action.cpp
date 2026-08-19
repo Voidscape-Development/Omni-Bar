@@ -199,9 +199,63 @@ bool FrontendAction::isActive() const
 	return false;
 }
 
+// Locale key for the name shown to the user. Kept separate from the serialised
+// identifier, which must never change.
+static const char *frontendActionLabelKey(FrontendActionType type)
+{
+	switch (type) {
+	case FrontendActionType::StartStreaming:
+		return "OmniBar.Action.StartStream";
+	case FrontendActionType::StopStreaming:
+		return "OmniBar.Action.StopStream";
+	case FrontendActionType::ToggleStreaming:
+		return "OmniBar.Action.ToggleStream";
+	case FrontendActionType::StartRecording:
+		return "OmniBar.Action.StartRecord";
+	case FrontendActionType::StopRecording:
+		return "OmniBar.Action.StopRecord";
+	case FrontendActionType::ToggleRecording:
+		return "OmniBar.Action.ToggleRecord";
+	case FrontendActionType::PauseRecording:
+		return "OmniBar.Action.Pause";
+	case FrontendActionType::UnpauseRecording:
+		return "OmniBar.Action.Unpause";
+	case FrontendActionType::TogglePauseRecording:
+		return "OmniBar.Action.TogglePause";
+	case FrontendActionType::StartReplayBuffer:
+		return "OmniBar.Action.StartReplay";
+	case FrontendActionType::StopReplayBuffer:
+		return "OmniBar.Action.StopReplay";
+	case FrontendActionType::ToggleReplayBuffer:
+		return "OmniBar.Action.ToggleReplay";
+	case FrontendActionType::SaveReplayBuffer:
+		return "OmniBar.Action.SaveReplay";
+	case FrontendActionType::StartVirtualCam:
+		return "OmniBar.Action.StartVirtualCam";
+	case FrontendActionType::StopVirtualCam:
+		return "OmniBar.Action.StopVirtualCam";
+	case FrontendActionType::ToggleVirtualCam:
+		return "OmniBar.Action.ToggleVirtualCam";
+	case FrontendActionType::EnableStudioMode:
+		return "OmniBar.Action.EnableStudioMode";
+	case FrontendActionType::DisableStudioMode:
+		return "OmniBar.Action.DisableStudioMode";
+	case FrontendActionType::ToggleStudioMode:
+		return "OmniBar.Action.ToggleStudioMode";
+	case FrontendActionType::TransitionToProgram:
+		return "OmniBar.Action.Transition";
+	}
+	return "OmniBar.Action.ToggleStream";
+}
+
+QString FrontendAction::getFrontendActionLabel(FrontendActionType type)
+{
+	return QString::fromUtf8(obs_module_text(frontendActionLabelKey(type)));
+}
+
 QString FrontendAction::getDisplayName() const
 {
-	return getFrontendActionName(actionType);
+	return getFrontendActionLabel(actionType);
 }
 
 obs_data_t *FrontendAction::serialize() const
@@ -390,11 +444,42 @@ bool SourceHotkeyAction::isValid() const
 	return true;
 }
 
+QString SourceHotkeyAction::hotkeyDescription() const
+{
+	if (!cachedDescription.isEmpty())
+		return cachedDescription;
+
+	struct DescriptionSearch {
+		QString targetName;
+		QString targetSource;
+		QString *result;
+	};
+
+	DescriptionSearch search{hotkeyName, sourceName, &cachedDescription};
+
+	obs_enum_hotkeys(
+		[](void *data, obs_hotkey_id, obs_hotkey_t *key) {
+			DescriptionSearch *s = static_cast<DescriptionSearch *>(data);
+			if (QString::fromUtf8(obs_hotkey_get_name(key)) != s->targetName)
+				return true;
+			if (SourceHotkeyAction::hotkeyOwnerName(key) != s->targetSource)
+				return true;
+
+			const char *description = obs_hotkey_get_description(key);
+			if (description && *description)
+				*s->result = QString::fromUtf8(description);
+			return false;
+		},
+		&search);
+
+	return cachedDescription.isEmpty() ? hotkeyName : cachedDescription;
+}
+
 QString SourceHotkeyAction::getDisplayName() const
 {
 	if (sourceName.isEmpty())
-		return QString("Hotkey: %1").arg(hotkeyName);
-	return QString("Hotkey: %1 (%2)").arg(hotkeyName, sourceName);
+		return QString::fromUtf8(obs_module_text("OmniBar.Summary.HotkeyGlobal")).arg(hotkeyDescription());
+	return QString::fromUtf8(obs_module_text("OmniBar.Summary.Hotkey")).arg(hotkeyDescription(), sourceName);
 }
 
 obs_data_t *SourceHotkeyAction::serialize() const
@@ -460,7 +545,7 @@ bool SourceFilterAction::isValid() const
 
 QString SourceFilterAction::getDisplayName() const
 {
-	return QString("Filter: %1 on %2").arg(filterName, sourceName);
+	return QString::fromUtf8(obs_module_text("OmniBar.Summary.Filter")).arg(filterName, sourceName);
 }
 
 obs_data_t *SourceFilterAction::serialize() const
@@ -540,7 +625,7 @@ bool SourceVisibilityAction::isValid() const
 
 QString SourceVisibilityAction::getDisplayName() const
 {
-	return QString("Visibility: %1 in %2").arg(sourceName, sceneName);
+	return QString::fromUtf8(obs_module_text("OmniBar.Summary.Visibility")).arg(sourceName, sceneName);
 }
 
 obs_data_t *SourceVisibilityAction::serialize() const
