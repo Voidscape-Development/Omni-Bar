@@ -338,8 +338,9 @@ void OmniBarButton::updateState()
 	if (!buttonConfig)
 		return;
 
-	// Hide buttons whose target no longer exists (source deleted, etc).
-	actionValid = buttonConfig->isValid();
+	// Hide buttons whose target no longer exists (source deleted, etc), and
+	// those whose show condition does not currently hold.
+	actionValid = buttonConfig->isValid() && buttonConfig->showCondition.isSatisfied(buttonConfig->action.get());
 	refreshVisibility();
 
 	// Groups without an action of their own use the checked state to show
@@ -745,6 +746,7 @@ void OmniBar::clearButtons()
 	groups.clear();
 
 	buttons.clear();
+	decorations.clear();
 	activeConfigs.clear();
 
 	// QToolBar::clear() only detaches the actions, so destroy them here;
@@ -786,13 +788,17 @@ void OmniBar::createButtonsFromConfig()
 			} else {
 				spacer->setFixedHeight(spacerSize);
 			}
-			barActions.append(addWidget(spacer));
+			QAction *spacerEntry = addWidget(spacer);
+			barActions.append(spacerEntry);
+			decorations.append({config, spacerEntry});
 			continue;
 		}
 
 		if (config->isDivider()) {
 			auto *divider = new OmniBarDivider(config, orientation(), SettingsManager::getStyle(), this);
-			barActions.append(addWidget(divider));
+			QAction *dividerEntry = addWidget(divider);
+			barActions.append(dividerEntry);
+			decorations.append({config, dividerEntry});
 			continue;
 		}
 
@@ -872,11 +878,13 @@ void OmniBar::connectGroupTriggers(GroupRuntime *group)
 			// the parent, so ignore the reopen that would follow.
 			if (!g->expanded && g->flyoutClosedAt.isValid() && g->flyoutClosedAt.elapsed() < 150)
 				return;
+			if (!g->expanded && !groupConditionHolds(g))
+				return;
 			setGroupExpanded(g, !g->expanded);
 		});
 		break;
 
-	case GroupExpandMode::ParentActive:
+	case GroupExpandMode::WhenActive:
 		// Expansion follows the parent's action state, so the chevron is
 		// only a hint and clicks stay with the action.
 		g->parentButton->setGroupIndicator(true, false, false);
@@ -892,7 +900,8 @@ void OmniBar::connectGroupTriggers(GroupRuntime *group)
 
 		connect(g->parentButton, &OmniBarButton::hoverEntered, this, [this, g]() {
 			cancelHoverCollapse(g);
-			setGroupExpanded(g, true);
+			if (groupConditionHolds(g))
+				setGroupExpanded(g, true);
 		});
 		connect(g->parentButton, &OmniBarButton::hoverLeft, this, [this, g]() { startHoverCollapse(g); });
 
@@ -909,6 +918,20 @@ void OmniBar::connectGroupTriggers(GroupRuntime *group)
 		}
 		break;
 	}
+}
+
+// An unset condition on the WhenActive mode means the group's own action, which
+// is what "expand when active" meant before conditions existed.
+bool OmniBar::groupConditionHolds(GroupRuntime *group) const
+{
+	if (!group || !group->config)
+		return false;
+
+	ActivationCondition condition = group->config->expandCondition;
+	if (group->config->groupExpand == GroupExpandMode::WhenActive && !condition.isSet())
+		condition.source = ConditionSource::OwnAction;
+
+	return condition.isSatisfied(group->config->action.get());
 }
 
 void OmniBar::setGroupExpanded(GroupRuntime *group, bool expanded)
@@ -967,11 +990,23 @@ void OmniBar::updateButtonStates()
 	}
 
 	for (auto &group : groups) {
-		if (group->config->groupExpand != GroupExpandMode::ParentActive)
-			continue;
+		const auto &config = group->config;
+		bool holds = groupConditionHolds(group.get());
 
-		bool active = group->config->hasAction() && group->config->action->isActive();
-		setGroupExpanded(group.get(), active);
+		if (config->groupExpand == GroupExpandMode::WhenActive) {
+			// Here the condition is the trigger.
+			setGroupExpanded(group.get(), holds);
+		} else if (!holds) {
+			// Click and hover open the group themselves; the condition
+			// only decides whether they are allowed to.
+			setGroupExpanded(group.get(), false);
+		}
+	}
+
+	for (const auto &decoration : decorations) {
+		if (decoration.second)
+			decoration.second->setVisible(
+				decoration.first->showCondition.isSatisfied(decoration.first->action.get()));
 	}
 }
 

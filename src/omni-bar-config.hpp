@@ -35,6 +35,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "bar-style.hpp"
 #include "omni-bar.hpp"
+#include "button-action.hpp"
 
 class ButtonConfig;
 
@@ -55,6 +56,28 @@ protected:
 
 private:
 	bool isDropAllowed(QTreeWidgetItem *source, QTreeWidgetItem *target, DropIndicatorPosition position) const;
+};
+
+// Picks an OBS state to test against, with an option to invert it. Shared by
+// the button, group and decoration editors so a condition is set the same way
+// wherever it appears.
+class ConditionEditor : public QWidget {
+	Q_OBJECT
+
+public:
+	// allowOwnAction offers "this button's own action", which is meaningless
+	// for a spacer or divider.
+	explicit ConditionEditor(bool allowOwnAction, QWidget *parent = nullptr);
+
+	void setCondition(const ActivationCondition &condition);
+	ActivationCondition condition() const;
+
+signals:
+	void changed();
+
+private:
+	QComboBox *sourceCombo;
+	QCheckBox *invertCheck;
 };
 
 // Renders one button exactly as the bar would, over the bar's own backdrop.
@@ -151,6 +174,7 @@ private:
 	QPushButton *iconBrowseButton = nullptr;
 	QLabel *iconPreview = nullptr;
 	QCheckBox *tintIconCheck = nullptr;
+	ConditionEditor *showConditionEditor = nullptr;
 	QCheckBox *customColorCheck = nullptr;
 	QPushButton *customColorButton = nullptr;
 
@@ -179,6 +203,7 @@ private:
 	QWidget *groupSettings = nullptr;
 	QComboBox *groupDisplayCombo = nullptr;
 	QComboBox *groupExpandCombo = nullptr;
+	ConditionEditor *groupConditionEditor = nullptr;
 	QLabel *groupHint = nullptr;
 	QListWidget *childList = nullptr;
 	QPushButton *addChildButton = nullptr;
