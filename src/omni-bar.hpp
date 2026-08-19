@@ -25,6 +25,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QHash>
 #include <QPointer>
 #include <QElapsedTimer>
+#include <QPair>
 #include <obs-frontend-api.h>
 #include <memory>
 #include <vector>
@@ -188,6 +189,7 @@ private:
 	void buildGroup(GroupRuntime *group);
 	void connectGroupTriggers(GroupRuntime *group);
 	void setGroupExpanded(GroupRuntime *group, bool expanded);
+	bool groupConditionHolds(GroupRuntime *group) const;
 	void startHoverCollapse(GroupRuntime *group);
 	void cancelHoverCollapse(GroupRuntime *group);
 	void applyStyleToBar();
@@ -195,6 +197,9 @@ private:
 	void scheduleUpdate();
 
 	QList<OmniBarButton *> buttons;
+	// Spacers and dividers are plain widgets rather than buttons, so their
+	// toolbar entries are tracked to follow a show condition.
+	QList<QPair<std::shared_ptr<ButtonConfig>, QAction *>> decorations;
 	std::vector<std::unique_ptr<GroupRuntime>> groups;
 	QList<std::shared_ptr<ButtonConfig>> activeConfigs;
 	// QToolBar::clear() only detaches actions, so the widget actions this bar

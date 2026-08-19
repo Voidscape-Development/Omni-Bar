@@ -35,6 +35,22 @@ A button can be a group holding other buttons. Each group chooses independently:
 
 Groups hold buttons one level deep; a child is never itself a group.
 
+### Conditions
+
+Any entry can be tied to what OBS is currently doing. Each carries an optional
+condition — **streaming**, **recording**, **recording paused**, **replay buffer
+running**, **virtual camera running**, **studio mode on**, or the button's own
+action being active — which can be inverted to mean *while it is not*.
+
+- On a **button, spacer or divider**, the condition decides whether it appears
+  at all: a Save Replay button that shows up only once the buffer is running, or
+  a pre-flight group that disappears the moment you go live.
+- On a **group**, it also drives expansion. With *Expand on: Condition is met*
+  the group opens and closes by itself — a recording group that unfolds its
+  pause and stop buttons while recording, without the group having to be a
+  recording button. With *Click* or *Hover* the condition instead gates whether
+  the group can be opened at all.
+
 ### Layout
 
 - **Spacer** — blank space of a chosen size

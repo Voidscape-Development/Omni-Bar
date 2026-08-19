@@ -61,8 +61,44 @@ enum class ButtonDisplayMode { IconOnly = 0, TextOnly = 1, TextRight = 2, TextBe
 // How a group presents its children.
 enum class GroupDisplayMode { Flyout = 0, Inline = 1 };
 
-// What causes a group to expand.
-enum class GroupExpandMode { Click = 0, ParentActive = 1, Hover = 2 };
+// What causes a group to expand. In WhenActive the group's condition is what
+// opens and closes it; in the other two the condition only gates whether it may
+// open at all.
+enum class GroupExpandMode { Click = 0, WhenActive = 1, Hover = 2 };
+
+// The OBS state a condition watches. The numbers are written to the
+// configuration file, so existing ones must keep their values.
+enum class ConditionSource {
+	Always = 0,
+	OwnAction = 1,
+	Streaming = 2,
+	Recording = 3,
+	RecordingPaused = 4,
+	ReplayBuffer = 5,
+	VirtualCam = 6,
+	StudioMode = 7
+};
+
+class ButtonAction;
+
+// An optional test against what OBS is currently doing, used both to decide
+// whether an entry appears on the bar and whether a group may be open.
+struct ActivationCondition {
+	ConditionSource source = ConditionSource::Always;
+	bool inverted = false;
+
+	bool isSet() const { return source != ConditionSource::Always; }
+
+	// An unset condition always holds. action supplies the OwnAction source
+	// and may be null.
+	bool isSatisfied(const ButtonAction *action) const;
+
+	// Short phrase for the settings list.
+	QString describe() const;
+
+	void serialize(obs_data_t *data, const char *prefix) const;
+	static ActivationCondition deserialize(obs_data_t *data, const char *prefix);
+};
 
 class ButtonAction {
 public:
@@ -250,6 +286,9 @@ public:
 
 	ButtonDisplayMode displayMode = ButtonDisplayMode::IconOnly;
 
+	// While this does not hold, the entry is left off the bar entirely.
+	ActivationCondition showCondition;
+
 	// Recolour a user-supplied icon to match the bar. Bundled icons always
 	// follow the bar; a custom file is drawn as authored unless this is set,
 	// since recolouring would ruin a deliberately coloured graphic.
@@ -264,6 +303,9 @@ public:
 	bool isGroup = false;
 	GroupDisplayMode groupDisplay = GroupDisplayMode::Flyout;
 	GroupExpandMode groupExpand = GroupExpandMode::Click;
+	// In WhenActive this drives the group open and closed; otherwise it gates
+	// whether clicking or hovering may open it.
+	ActivationCondition expandCondition;
 	QList<std::shared_ptr<ButtonConfig>> children;
 
 	obs_data_t *serialize() const;

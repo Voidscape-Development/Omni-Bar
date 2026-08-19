@@ -22,6 +22,96 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QUuid>
 #include <QStringList>
 
+// ActivationCondition implementation
+bool ActivationCondition::isSatisfied(const ButtonAction *action) const
+{
+	if (source == ConditionSource::Always)
+		return true;
+
+	bool state = false;
+	switch (source) {
+	case ConditionSource::OwnAction:
+		state = action && action->isActive();
+		break;
+	case ConditionSource::Streaming:
+		state = obs_frontend_streaming_active();
+		break;
+	case ConditionSource::Recording:
+		state = obs_frontend_recording_active();
+		break;
+	case ConditionSource::RecordingPaused:
+		state = obs_frontend_recording_paused();
+		break;
+	case ConditionSource::ReplayBuffer:
+		state = obs_frontend_replay_buffer_active();
+		break;
+	case ConditionSource::VirtualCam:
+		state = obs_frontend_virtualcam_active();
+		break;
+	case ConditionSource::StudioMode:
+		state = obs_frontend_preview_program_mode_active();
+		break;
+	case ConditionSource::Always:
+		return true;
+	}
+
+	return inverted ? !state : state;
+}
+
+static const char *conditionSourceKey(ConditionSource source)
+{
+	switch (source) {
+	case ConditionSource::Always:
+		return "OmniBar.Condition.Always";
+	case ConditionSource::OwnAction:
+		return "OmniBar.Condition.OwnAction";
+	case ConditionSource::Streaming:
+		return "OmniBar.Condition.Streaming";
+	case ConditionSource::Recording:
+		return "OmniBar.Condition.Recording";
+	case ConditionSource::RecordingPaused:
+		return "OmniBar.Condition.RecordingPaused";
+	case ConditionSource::ReplayBuffer:
+		return "OmniBar.Condition.ReplayBuffer";
+	case ConditionSource::VirtualCam:
+		return "OmniBar.Condition.VirtualCam";
+	case ConditionSource::StudioMode:
+		return "OmniBar.Condition.StudioMode";
+	}
+	return "OmniBar.Condition.Always";
+}
+
+QString ActivationCondition::describe() const
+{
+	QString name = QString::fromUtf8(obs_module_text(conditionSourceKey(source)));
+	if (!isSet())
+		return name;
+	if (inverted)
+		return QString::fromUtf8(obs_module_text("OmniBar.Condition.NotFormat")).arg(name);
+	return name;
+}
+
+void ActivationCondition::serialize(obs_data_t *data, const char *prefix) const
+{
+	if (!data || !prefix)
+		return;
+	obs_data_set_int(data, QString("%1_source").arg(prefix).toUtf8().constData(), static_cast<int>(source));
+	obs_data_set_bool(data, QString("%1_inverted").arg(prefix).toUtf8().constData(), inverted);
+}
+
+ActivationCondition ActivationCondition::deserialize(obs_data_t *data, const char *prefix)
+{
+	ActivationCondition condition;
+	if (!data || !prefix)
+		return condition;
+
+	QString sourceKey = QString("%1_source").arg(prefix);
+	if (obs_data_has_user_value(data, sourceKey.toUtf8().constData()))
+		condition.source = static_cast<ConditionSource>(obs_data_get_int(data, sourceKey.toUtf8().constData()));
+	condition.inverted = obs_data_get_bool(data, QString("%1_inverted").arg(prefix).toUtf8().constData());
+	return condition;
+}
+
 // ButtonAction static deserialize
 std::unique_ptr<ButtonAction> ButtonAction::deserialize(obs_data_t *data)
 {
@@ -692,9 +782,11 @@ obs_data_t *ButtonConfig::serialize() const
 	obs_data_set_bool(data, "use_custom_color", useCustomColor);
 	obs_data_set_string(data, "custom_color",
 			    customColor.isValid() ? customColor.name(QColor::HexArgb).toUtf8().constData() : "");
+	showCondition.serialize(data, "show_condition");
 	obs_data_set_bool(data, "is_group", isGroup);
 	obs_data_set_int(data, "group_display", static_cast<int>(groupDisplay));
 	obs_data_set_int(data, "group_expand", static_cast<int>(groupExpand));
+	expandCondition.serialize(data, "expand_condition");
 
 	if (action) {
 		obs_data_t *actionData = action->serialize();
@@ -741,19 +833,27 @@ std::shared_ptr<ButtonConfig> ButtonConfig::deserialize(obs_data_t *data)
 	if (!config->customColor.isValid())
 		config->useCustomColor = false;
 
+	config->showCondition = ActivationCondition::deserialize(data, "show_condition");
+
 	if (obs_data_has_user_value(data, "is_group")) {
 		config->isGroup = obs_data_get_bool(data, "is_group");
 		config->groupDisplay = static_cast<GroupDisplayMode>(obs_data_get_int(data, "group_display"));
 		config->groupExpand = static_cast<GroupExpandMode>(obs_data_get_int(data, "group_expand"));
+		config->expandCondition = ActivationCondition::deserialize(data, "expand_condition");
 	} else {
 		// Configurations written before groups were reworked used
 		// "expandable" plus "expand_when_active", which only ever
 		// described an inline group.
 		config->isGroup = obs_data_get_bool(data, "expandable");
 		config->groupDisplay = GroupDisplayMode::Inline;
-		config->groupExpand = obs_data_get_bool(data, "expand_when_active") ? GroupExpandMode::ParentActive
+		config->groupExpand = obs_data_get_bool(data, "expand_when_active") ? GroupExpandMode::WhenActive
 										    : GroupExpandMode::Click;
 	}
+
+	// Before conditions existed, expanding "when active" could only mean the
+	// group's own action, so state that explicitly rather than leaving it unset.
+	if (config->groupExpand == GroupExpandMode::WhenActive && !config->expandCondition.isSet())
+		config->expandCondition.source = ConditionSource::OwnAction;
 
 	obs_data_t *actionData = obs_data_get_obj(data, "action");
 	if (actionData) {
@@ -862,8 +962,8 @@ QString ButtonConfig::summaryText() const
 		case GroupExpandMode::Click:
 			modeKey = "OmniBar.Group.Expand.Click";
 			break;
-		case GroupExpandMode::ParentActive:
-			modeKey = "OmniBar.Group.Expand.ParentActive";
+		case GroupExpandMode::WhenActive:
+			modeKey = "OmniBar.Group.Expand.WhenActive";
 			break;
 		case GroupExpandMode::Hover:
 			modeKey = "OmniBar.Group.Expand.Hover";
@@ -875,6 +975,8 @@ QString ButtonConfig::summaryText() const
 
 		QStringList parts;
 		parts << QString::fromUtf8(obs_module_text("OmniBar.Group.ChildCount")).arg(children.size());
+		if (expandCondition.isSet())
+			parts << expandCondition.describe();
 		parts << QString::fromUtf8(obs_module_text(displayKey.toUtf8().constData()));
 		parts << QString::fromUtf8(obs_module_text(modeKey.toUtf8().constData()));
 		if (hasAction())
@@ -882,7 +984,12 @@ QString ButtonConfig::summaryText() const
 		return parts.join(" - ");
 	}
 
-	return action ? action->getDisplayName() : QString();
+	QString summary = action ? action->getDisplayName() : QString();
+	if (showCondition.isSet())
+		summary +=
+			" - " +
+			QString::fromUtf8(obs_module_text("OmniBar.Condition.OnlyWhile")).arg(showCondition.describe());
+	return summary;
 }
 
 std::shared_ptr<ButtonConfig> ButtonConfig::clone() const

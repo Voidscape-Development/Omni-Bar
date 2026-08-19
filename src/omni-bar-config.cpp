@@ -76,6 +76,64 @@ static void setColorSwatch(QPushButton *button, const QColor &color)
 }
 
 // ============================================================================
+// ConditionEditor
+// ============================================================================
+
+ConditionEditor::ConditionEditor(bool allowOwnAction, QWidget *parent) : QWidget(parent)
+{
+	QHBoxLayout *layout = new QHBoxLayout(this);
+	layout->setContentsMargins(0, 0, 0, 0);
+
+	sourceCombo = new QComboBox();
+	sourceCombo->addItem(obs_module_text("OmniBar.Condition.Always"), static_cast<int>(ConditionSource::Always));
+	if (allowOwnAction)
+		sourceCombo->addItem(obs_module_text("OmniBar.Condition.OwnAction"),
+				     static_cast<int>(ConditionSource::OwnAction));
+	sourceCombo->addItem(obs_module_text("OmniBar.Condition.Streaming"),
+			     static_cast<int>(ConditionSource::Streaming));
+	sourceCombo->addItem(obs_module_text("OmniBar.Condition.Recording"),
+			     static_cast<int>(ConditionSource::Recording));
+	sourceCombo->addItem(obs_module_text("OmniBar.Condition.RecordingPaused"),
+			     static_cast<int>(ConditionSource::RecordingPaused));
+	sourceCombo->addItem(obs_module_text("OmniBar.Condition.ReplayBuffer"),
+			     static_cast<int>(ConditionSource::ReplayBuffer));
+	sourceCombo->addItem(obs_module_text("OmniBar.Condition.VirtualCam"),
+			     static_cast<int>(ConditionSource::VirtualCam));
+	sourceCombo->addItem(obs_module_text("OmniBar.Condition.StudioMode"),
+			     static_cast<int>(ConditionSource::StudioMode));
+	layout->addWidget(sourceCombo, 1);
+
+	invertCheck = new QCheckBox(obs_module_text("OmniBar.Settings.Invert"));
+	layout->addWidget(invertCheck);
+
+	connect(sourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+		// Inverting "always" would mean never, which is never useful.
+		invertCheck->setEnabled(sourceCombo->currentData().toInt() !=
+					static_cast<int>(ConditionSource::Always));
+		emit changed();
+	});
+	connect(invertCheck, &QCheckBox::toggled, this, &ConditionEditor::changed);
+
+	invertCheck->setEnabled(false);
+}
+
+void ConditionEditor::setCondition(const ActivationCondition &condition)
+{
+	int index = sourceCombo->findData(static_cast<int>(condition.source));
+	sourceCombo->setCurrentIndex(index >= 0 ? index : 0);
+	invertCheck->setChecked(condition.inverted);
+	invertCheck->setEnabled(condition.isSet());
+}
+
+ActivationCondition ConditionEditor::condition() const
+{
+	ActivationCondition result;
+	result.source = static_cast<ConditionSource>(sourceCombo->currentData().toInt());
+	result.inverted = result.isSet() && invertCheck->isChecked();
+	return result;
+}
+
+// ============================================================================
 // ButtonTreeWidget
 // ============================================================================
 
@@ -277,6 +335,9 @@ void ButtonEditDialog::setupDividerUI()
 	colorLayout->addWidget(dividerColorButton, 1);
 	form->addRow(obs_module_text("OmniBar.Settings.DividerColor"), colorLayout);
 
+	showConditionEditor = new ConditionEditor(false);
+	form->addRow(obs_module_text("OmniBar.Settings.ShowCondition"), showConditionEditor);
+
 	mainLayout->addLayout(form);
 
 	QLabel *hint = new QLabel(obs_module_text("OmniBar.Settings.DividerHint"));
@@ -336,6 +397,9 @@ void ButtonEditDialog::setupSpacerUI()
 	spacerWidthSpin->setValue(10);
 	spacerWidthSpin->setSuffix(" px");
 	form->addRow(obs_module_text("OmniBar.Settings.SpacerWidth"), spacerWidthSpin);
+
+	showConditionEditor = new ConditionEditor(false);
+	form->addRow(obs_module_text("OmniBar.Settings.ShowCondition"), showConditionEditor);
 	mainLayout->addLayout(form);
 
 	QLabel *hint = new QLabel(obs_module_text("OmniBar.Settings.SpacerHint"));
@@ -529,6 +593,10 @@ QWidget *ButtonEditDialog::createAppearanceTab()
 	connect(tintIconCheck, &QCheckBox::toggled, this, &ButtonEditDialog::updateIconPreview);
 	form->addRow(QString(), tintIconCheck);
 
+	showConditionEditor = new ConditionEditor(true);
+	connect(showConditionEditor, &ConditionEditor::changed, this, &ButtonEditDialog::refreshPreview);
+	form->addRow(obs_module_text("OmniBar.Settings.ShowCondition"), showConditionEditor);
+
 	// Per-button accent override
 	QHBoxLayout *colorLayout = new QHBoxLayout();
 	customColorCheck = new QCheckBox(obs_module_text("OmniBar.Settings.UseCustomColor"));
@@ -678,13 +746,18 @@ QWidget *ButtonEditDialog::createGroupTab()
 	groupExpandCombo = new QComboBox();
 	groupExpandCombo->addItem(obs_module_text("OmniBar.Group.Expand.Click"),
 				  static_cast<int>(GroupExpandMode::Click));
-	groupExpandCombo->addItem(obs_module_text("OmniBar.Group.Expand.ParentActive"),
-				  static_cast<int>(GroupExpandMode::ParentActive));
+	groupExpandCombo->addItem(obs_module_text("OmniBar.Group.Expand.WhenActive"),
+				  static_cast<int>(GroupExpandMode::WhenActive));
 	groupExpandCombo->addItem(obs_module_text("OmniBar.Group.Expand.Hover"),
 				  static_cast<int>(GroupExpandMode::Hover));
 	connect(groupExpandCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
 		[this]() { onGroupToggled(groupCheck->isChecked()); });
 	form->addRow(obs_module_text("OmniBar.Settings.GroupExpand"), groupExpandCombo);
+
+	groupConditionEditor = new ConditionEditor(true);
+	connect(groupConditionEditor, &ConditionEditor::changed, this,
+		[this]() { onGroupToggled(groupCheck->isChecked()); });
+	form->addRow(obs_module_text("OmniBar.Settings.GroupCondition"), groupConditionEditor);
 	settingsLayout->addLayout(form);
 
 	groupHint = new QLabel();
@@ -727,6 +800,8 @@ void ButtonEditDialog::populateFromConfig()
 {
 	if (!buttonConfig)
 		return;
+
+	showConditionEditor->setCondition(buttonConfig->showCondition);
 
 	if (spacerMode) {
 		auto *spacerAction = dynamic_cast<SpacerAction *>(buttonConfig->action.get());
@@ -779,6 +854,7 @@ void ButtonEditDialog::populateFromConfig()
 		groupDisplayCombo->setCurrentIndex(displayMode >= 0 ? displayMode : 0);
 		int expandMode = groupExpandCombo->findData(static_cast<int>(buttonConfig->groupExpand));
 		groupExpandCombo->setCurrentIndex(expandMode >= 0 ? expandMode : 0);
+		groupConditionEditor->setCondition(buttonConfig->expandCondition);
 
 		workingChildren.clear();
 		for (const auto &child : buttonConfig->children) {
@@ -860,6 +936,8 @@ void ButtonEditDialog::populateFromConfig()
 
 void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
 {
+	target.showCondition = showConditionEditor->condition();
+
 	if (spacerMode) {
 		target.action = std::make_unique<SpacerAction>(spacerWidthSpin->value());
 		return;
@@ -889,6 +967,7 @@ void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
 		target.isGroup = groupCheck->isChecked();
 		target.groupDisplay = static_cast<GroupDisplayMode>(groupDisplayCombo->currentData().toInt());
 		target.groupExpand = static_cast<GroupExpandMode>(groupExpandCombo->currentData().toInt());
+		target.expandCondition = groupConditionEditor->condition();
 		target.children.clear();
 		if (target.isGroup) {
 			for (const auto &child : workingChildren) {
@@ -1020,14 +1099,31 @@ void ButtonEditDialog::onGroupToggled(bool enabled)
 
 	auto expandMode = static_cast<GroupExpandMode>(groupExpandCombo->currentData().toInt());
 	auto actionType = static_cast<ActionType>(actionTypeCombo->currentData().toInt());
+	ActivationCondition condition = groupConditionEditor->condition();
 
-	if (expandMode == GroupExpandMode::ParentActive && actionType == ActionType::None) {
-		groupHint->setText(obs_module_text("OmniBar.Settings.GroupNeedsAction"));
-	} else if (expandMode == GroupExpandMode::Click && actionType != ActionType::None) {
-		groupHint->setText(obs_module_text("OmniBar.Settings.GroupSplitHint"));
+	// Watching the button's own action needs there to be one.
+	bool needsAction = condition.source == ConditionSource::OwnAction ||
+			   (expandMode == GroupExpandMode::WhenActive && !condition.isSet());
+
+	QStringList hints;
+
+	if (needsAction && actionType == ActionType::None) {
+		hints << obs_module_text("OmniBar.Settings.GroupNeedsAction");
+	} else if (expandMode == GroupExpandMode::WhenActive) {
+		hints << obs_module_text("OmniBar.Settings.GroupCondWhenActive");
 	} else {
-		groupHint->setText(obs_module_text("OmniBar.Settings.GroupHint"));
+		if (expandMode == GroupExpandMode::Click && actionType != ActionType::None)
+			hints << obs_module_text("OmniBar.Settings.GroupSplitHint");
+		else
+			hints << obs_module_text("OmniBar.Settings.GroupHint");
+
+		// In these modes the condition is only a gate, which is worth
+		// spelling out so a group that will not open is not a mystery.
+		if (condition.isSet())
+			hints << obs_module_text("OmniBar.Settings.GroupCondGate");
 	}
+
+	groupHint->setText(hints.join(" "));
 
 	refreshPreview();
 }
