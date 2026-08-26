@@ -42,6 +42,11 @@ public:
 	static DockPosition getDockPosition();
 	static void setDockPosition(DockPosition position);
 
+	// The last edge the bar was docked to, which is where the show/hide
+	// hotkey puts it back. Never None, so there is always somewhere to
+	// return to - even for a bar that has been hidden since it was installed.
+	static DockPosition getLastVisiblePosition();
+
 	// Bar and button styling
 	static const BarStyle &getStyle();
 	static void setStyle(const BarStyle &style);
@@ -58,6 +63,7 @@ private:
 	static QString getConfigPath();
 
 	static DockPosition dockPosition;
+	static DockPosition lastVisiblePosition;
 	static BarStyle style;
 	static QList<std::shared_ptr<ButtonConfig>> buttons;
 	static bool loaded;

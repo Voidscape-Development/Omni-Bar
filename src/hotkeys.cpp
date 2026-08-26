@@ -27,29 +27,42 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QMetaObject>
 #include <array>
 #include <cstdint>
+#include <optional>
 
 namespace {
 
 struct PositionHotkey {
-	DockPosition position;
+	// Where this hotkey puts the bar, or nothing for the one that toggles
+	// between hidden and the edge the bar was last on.
+	std::optional<DockPosition> target;
 	// Written into the OBS hotkey configuration, so it must not change.
 	const char *name;
 	const char *textKey;
 	obs_hotkey_id id = OBS_INVALID_HOTKEY_ID;
 };
 
-std::array<PositionHotkey, 5> hotkeys = {{
+std::array<PositionHotkey, 6> hotkeys = {{
 	{DockPosition::Top, "OmniBar.MoveTop", "OmniBar.Hotkey.MoveTop"},
 	{DockPosition::Left, "OmniBar.MoveLeft", "OmniBar.Hotkey.MoveLeft"},
 	{DockPosition::Bottom, "OmniBar.MoveBottom", "OmniBar.Hotkey.MoveBottom"},
 	{DockPosition::Right, "OmniBar.MoveRight", "OmniBar.Hotkey.MoveRight"},
 	{DockPosition::None, "OmniBar.Hide", "OmniBar.Hotkey.Hide"},
+	{std::nullopt, "OmniBar.ToggleVisible", "OmniBar.Hotkey.Toggle"},
 }};
 
 // Runs on the UI thread: moving the bar touches widgets, and the settings file
-// is written from here too.
-void applyPosition(DockPosition position)
+// is written from here too. An empty target means the toggle, which takes the
+// bar away and brings it back to where it was.
+void applyPosition(std::optional<DockPosition> target)
 {
+	DockPosition position;
+	if (target)
+		position = *target;
+	else if (SettingsManager::getDockPosition() == DockPosition::None)
+		position = SettingsManager::getLastVisiblePosition();
+	else
+		position = DockPosition::None;
+
 	if (SettingsManager::getDockPosition() == position)
 		return;
 
@@ -74,25 +87,30 @@ void onPositionHotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool p
 	if (!pressed)
 		return;
 
-	auto position = static_cast<DockPosition>(reinterpret_cast<intptr_t>(data));
+	// The entry rather than the position, since the toggle has none.
+	auto index = static_cast<size_t>(reinterpret_cast<intptr_t>(data));
+	if (index >= hotkeys.size())
+		return;
+
+	std::optional<DockPosition> target = hotkeys[index].target;
 
 	// Hotkeys do not necessarily arrive on the UI thread, so hand the work
 	// over to it rather than moving widgets from underneath OBS.
 	if (QCoreApplication *app = QCoreApplication::instance())
-		QMetaObject::invokeMethod(app, [position]() { applyPosition(position); }, Qt::QueuedConnection);
+		QMetaObject::invokeMethod(app, [target]() { applyPosition(target); }, Qt::QueuedConnection);
 }
 
 } // namespace
 
 void OmniBarHotkeys::registerAll()
 {
-	for (auto &entry : hotkeys) {
+	for (size_t i = 0; i < hotkeys.size(); i++) {
+		PositionHotkey &entry = hotkeys[i];
 		if (entry.id != OBS_INVALID_HOTKEY_ID)
 			continue;
 
-		entry.id =
-			obs_hotkey_register_frontend(entry.name, obs_module_text(entry.textKey), onPositionHotkey,
-						     reinterpret_cast<void *>(static_cast<intptr_t>(entry.position)));
+		entry.id = obs_hotkey_register_frontend(entry.name, obs_module_text(entry.textKey), onPositionHotkey,
+							reinterpret_cast<void *>(static_cast<intptr_t>(i)));
 	}
 }
 

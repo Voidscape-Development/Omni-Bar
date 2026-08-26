@@ -27,6 +27,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 // rather than built from a preset: static initialisation runs before the plugin
 // is loaded, and preset colours are read from the Qt palette.
 DockPosition SettingsManager::dockPosition = DockPosition::Top;
+DockPosition SettingsManager::lastVisiblePosition = DockPosition::Top;
 BarStyle SettingsManager::style;
 QList<std::shared_ptr<ButtonConfig>> SettingsManager::buttons;
 bool SettingsManager::loaded = false;
@@ -62,6 +63,17 @@ void SettingsManager::load()
 	if (storedPosition >= static_cast<int>(DockPosition::Top) &&
 	    storedPosition <= static_cast<int>(DockPosition::None))
 		dockPosition = static_cast<DockPosition>(storedPosition);
+
+	// An edge, never None, so the show/hide hotkey always has a way back. A
+	// configuration written before this was stored falls back to whatever
+	// position it does have.
+	int storedVisible = static_cast<int>(obs_data_get_int(data, "last_visible_position"));
+	if (obs_data_has_user_value(data, "last_visible_position") &&
+	    storedVisible >= static_cast<int>(DockPosition::Top) &&
+	    storedVisible < static_cast<int>(DockPosition::None))
+		lastVisiblePosition = static_cast<DockPosition>(storedVisible);
+	else if (dockPosition != DockPosition::None)
+		lastVisiblePosition = dockPosition;
 
 	OmniBarHotkeys::loadBindings(data);
 
@@ -120,6 +132,7 @@ void SettingsManager::save()
 	obs_data_t *data = obs_data_create();
 
 	obs_data_set_int(data, "dock_position", static_cast<int>(dockPosition));
+	obs_data_set_int(data, "last_visible_position", static_cast<int>(lastVisiblePosition));
 
 	OmniBarHotkeys::saveBindings(data);
 
@@ -149,7 +162,17 @@ DockPosition SettingsManager::getDockPosition()
 
 void SettingsManager::setDockPosition(DockPosition position)
 {
+	// Every route to a real edge comes through here, so this is the one place
+	// that has to remember it for the show/hide hotkey.
+	if (position != DockPosition::None)
+		lastVisiblePosition = position;
+
 	dockPosition = position;
+}
+
+DockPosition SettingsManager::getLastVisiblePosition()
+{
+	return lastVisiblePosition == DockPosition::None ? DockPosition::Top : lastVisiblePosition;
 }
 
 const BarStyle &SettingsManager::getStyle()

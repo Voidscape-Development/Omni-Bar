@@ -93,8 +93,9 @@ The bar docks to the **top**, **left**, **bottom** or **right** edge of the main
 only when it is needed. The settings stay reachable from **Tools → Omni Bar Settings** while the bar
 is hidden.
 
-Five hotkeys under **Settings → Hotkeys** move the bar without opening the settings: one per edge,
-plus one that hides it. They start unbound. A hotkey changes the position for good, exactly as the
+Six hotkeys under **Settings → Hotkeys** move the bar without opening the settings: one per edge, one
+that hides it, and one that shows and hides it — taking the bar away and putting it back on whichever
+edge it was last on. They start unbound. A hotkey changes the position for good, exactly as the
 settings dialog does, so the bar comes back where you left it after a restart.
 
 ## Installation
