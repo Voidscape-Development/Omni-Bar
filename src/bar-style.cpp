@@ -19,7 +19,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "bar-style.hpp"
 #include <obs-module.h>
 #include <QApplication>
+#include <QElapsedTimer>
 #include <QPalette>
+#include <QtMath>
 
 bool omniBarIsDarkTheme()
 {
@@ -48,6 +50,25 @@ static QColor withAlpha(const QColor &color, int alpha)
 	QColor result = color;
 	result.setAlpha(alpha);
 	return result;
+}
+
+qreal omniBarPulseFactor(const BarStyle &style)
+{
+	// One clock for every pulsing button, started on first use, so buttons
+	// that light up at different times are still in phase with each other.
+	static QElapsedTimer clock;
+	if (!clock.isValid())
+		clock.start();
+
+	int period = qMax(100, style.pulsePeriod);
+	qreal depth = qBound(0.0, style.pulseIntensity / 100.0, 1.0);
+
+	// A cosine breath: full colour at the start of each period, dimmest in
+	// the middle, back to full at the end, with no jump between cycles.
+	qreal phase = static_cast<qreal>(clock.elapsed() % period) / period;
+	qreal dip = 0.5 - (0.5 * qCos(phase * 2.0 * M_PI));
+
+	return 1.0 - (depth * dip);
 }
 
 QString BarStyle::presetName(StylePreset preset)
@@ -127,6 +148,9 @@ BarStyle BarStyle::fromPreset(StylePreset preset)
 		style.cornerRadius = 6;
 		style.borderWidth = 1;
 		style.useCustomColors = true;
+		// The loudest of the presets, so its pulse is quicker and deeper.
+		style.pulsePeriod = 1000;
+		style.pulseIntensity = 75;
 
 		const QColor accent(0, 229, 255);
 		style.barBackground = QColor(18, 20, 26);
@@ -243,6 +267,18 @@ QString BarStyle::buttonAccentStyleSheet(const QColor &accent) const
 			   effectiveButtonBorder(), effectiveTextColor());
 }
 
+QString BarStyle::buttonPulseStyleSheet(const QColor &accent, qreal factor) const
+{
+	QColor base = accent.isValid() ? accent : effectiveButtonChecked();
+
+	// Only the active fill breathes: the icon, the label and the border stay
+	// put, so the button never reads as flickering or disabled.
+	QColor dimmed = withAlpha(base, qRound(base.alpha() * qBound(0.0, factor, 1.0)));
+
+	return buttonRules("QToolButton", *this, effectiveButtonBackground(), withAlpha(base, 90), dimmed,
+			   effectiveButtonBorder(), effectiveTextColor());
+}
+
 QString BarStyle::panelStyleSheet(const QString &objectName) const
 {
 	QColor panel = effectiveBarBackground();
@@ -285,6 +321,8 @@ obs_data_t *BarStyle::serialize() const
 	obs_data_set_int(data, "button_padding", buttonPadding);
 	obs_data_set_int(data, "corner_radius", cornerRadius);
 	obs_data_set_int(data, "border_width", borderWidth);
+	obs_data_set_int(data, "pulse_period", pulsePeriod);
+	obs_data_set_int(data, "pulse_intensity", pulseIntensity);
 	obs_data_set_bool(data, "use_custom_colors", useCustomColors);
 	obs_data_set_string(data, "bar_background", barBackground.name(QColor::HexArgb).toUtf8().constData());
 	obs_data_set_string(data, "button_background", buttonBackground.name(QColor::HexArgb).toUtf8().constData());
@@ -335,6 +373,10 @@ BarStyle BarStyle::deserialize(obs_data_t *data)
 		style.cornerRadius = static_cast<int>(obs_data_get_int(data, "corner_radius"));
 	if (obs_data_has_user_value(data, "border_width"))
 		style.borderWidth = static_cast<int>(obs_data_get_int(data, "border_width"));
+	if (obs_data_has_user_value(data, "pulse_period"))
+		style.pulsePeriod = static_cast<int>(obs_data_get_int(data, "pulse_period"));
+	if (obs_data_has_user_value(data, "pulse_intensity"))
+		style.pulseIntensity = static_cast<int>(obs_data_get_int(data, "pulse_intensity"));
 	style.useCustomColors = obs_data_get_bool(data, "use_custom_colors");
 
 	style.barBackground = readColor(data, "bar_background", style.barBackground);
@@ -354,6 +396,8 @@ BarStyle BarStyle::deserialize(obs_data_t *data)
 		style.cornerRadius = 0;
 	if (style.borderWidth < 0)
 		style.borderWidth = 0;
+	style.pulsePeriod = qBound(300, style.pulsePeriod, 5000);
+	style.pulseIntensity = qBound(10, style.pulseIntensity, 100);
 
 	return style;
 }
@@ -362,7 +406,8 @@ bool BarStyle::operator==(const BarStyle &other) const
 {
 	return preset == other.preset && iconSize == other.iconSize && spacing == other.spacing &&
 	       buttonPadding == other.buttonPadding && cornerRadius == other.cornerRadius &&
-	       borderWidth == other.borderWidth && useCustomColors == other.useCustomColors &&
+	       borderWidth == other.borderWidth && pulsePeriod == other.pulsePeriod &&
+	       pulseIntensity == other.pulseIntensity && useCustomColors == other.useCustomColors &&
 	       barBackground == other.barBackground && buttonBackground == other.buttonBackground &&
 	       buttonHover == other.buttonHover && buttonChecked == other.buttonChecked &&
 	       buttonBorder == other.buttonBorder && textColor == other.textColor;

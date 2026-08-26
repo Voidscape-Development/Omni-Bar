@@ -67,6 +67,11 @@ toggle never look alike — or from your own image file. Bundled icons follow th
 automatically; a custom icon is drawn as authored unless you ask for it to be tinted. Any button can
 override the shared accent colour used for its hover and active states.
 
+A button can also be set to **pulse while active**: its active colour breathes in and out for as long
+as its action is running, so a live button is noticeable out of the corner of your eye. How fast the
+breath runs and how far the colour fades are set once for the whole bar, so every pulsing button
+breathes in step.
+
 The bar itself starts from a preset:
 
 | Preset | Look |
@@ -76,9 +81,22 @@ The bar itself starts from a preset:
 | **Modern Rounded** | Rounded, raised buttons with a soft border and generous padding |
 | **Neon Accent** | Dark bar with a bright accent on hover and active states |
 
-Every value a preset sets — icon size, spacing, button padding, corner radius, border width, and the
-bar, button, hover, active, border and text colours — stays individually editable, and changing one
-switches the preset to Custom. Colours track the OBS theme until you turn custom colours on.
+Every value a preset sets — icon size, spacing, button padding, corner radius, border width, pulse
+speed and intensity, and the bar, button, hover, active, border and text colours — stays individually
+editable, and changing one switches the preset to Custom. Colours track the OBS theme until you turn
+custom colours on.
+
+### Position and hotkeys
+
+The bar docks to the **top**, **left**, **bottom** or **right** edge of the main window, or to
+**none** of them — which takes it off the window entirely, for anyone who would rather call it up
+only when it is needed. The settings stay reachable from **Tools → Omni Bar Settings** while the bar
+is hidden.
+
+Six hotkeys under **Settings → Hotkeys** move the bar without opening the settings: one per edge, one
+that hides it, and one that shows and hides it — taking the bar away and putting it back on whichever
+edge it was last on. They start unbound. A hotkey changes the position for good, exactly as the
+settings dialog does, so the bar comes back where you left it after a restart.
 
 ## Installation
 
@@ -97,7 +115,7 @@ Open **Tools → Omni Bar Settings**, or right-click the bar itself and choose *
 
 The **Buttons** tab lists what is on the bar. **Add** offers a button, a group, a spacer or a divider.
 Drag a row to reorder it, or drop it onto a group row to move it into that group. The same tab sets
-which edge of the window the bar docks to.
+which edge of the window the bar docks to, or hides it with **None**.
 
 Double-click a row to edit it. The editor previews the button as the bar will actually draw it while
 you change its label, icon, colour and action.
@@ -134,6 +152,7 @@ configure step.
 | `src/omni-bar-config.cpp` | Settings dialog and the per-button editor |
 | `src/button-action.cpp` | Action types and the button configuration model |
 | `src/bar-style.cpp` | Style presets and the stylesheets built from them |
+| `src/hotkeys.cpp` | The position hotkeys and their bindings |
 | `src/settings-manager.cpp` | Loading and saving `config.json` |
 
 ### Formatting

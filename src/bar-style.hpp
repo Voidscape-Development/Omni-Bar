@@ -36,6 +36,13 @@ struct BarStyle {
 	int cornerRadius = 4;
 	int borderWidth = 0;
 
+	// How a button set to pulse breathes while its action is active: one full
+	// fade out and back in every pulsePeriod, dipping to pulseIntensity per
+	// cent away from the solid active colour. Shared by every pulsing button
+	// so they stay in step with one another.
+	int pulsePeriod = 1400;
+	int pulseIntensity = 60;
+
 	// When false the colours below are ignored at render time and derived
 	// from the running OBS palette instead, so the bar tracks theme changes.
 	bool useCustomColors = false;
@@ -68,6 +75,11 @@ struct BarStyle {
 	// toolbar's sheet for the same properties.
 	QString buttonAccentStyleSheet(const QColor &accent) const;
 
+	// Stylesheet for a single button whose active fill is mid-breath. accent
+	// is the colour that button uses when active - the shared one, or its own
+	// override - and factor scales how much of it is showing, 0 to 1.
+	QString buttonPulseStyleSheet(const QColor &accent, qreal factor) const;
+
 	// Stylesheet for a panel that renders buttons on an opaque backdrop: a
 	// group's flyout, and the settings dialog's previews.
 	QString panelStyleSheet(const QString &objectName) const;
@@ -85,3 +97,9 @@ struct BarStyle {
 
 // True when OBS is currently running a dark theme.
 bool omniBarIsDarkTheme();
+
+// How much of the active colour a pulsing button should be showing right now,
+// from 1 at the top of the breath down to 1 - intensity at the bottom. Driven
+// by one clock shared across the whole plugin, so buttons that start pulsing at
+// different moments still breathe together.
+qreal omniBarPulseFactor(const BarStyle &style);

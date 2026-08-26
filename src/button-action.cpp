@@ -782,6 +782,7 @@ obs_data_t *ButtonConfig::serialize() const
 	obs_data_set_bool(data, "use_custom_color", useCustomColor);
 	obs_data_set_string(data, "custom_color",
 			    customColor.isValid() ? customColor.name(QColor::HexArgb).toUtf8().constData() : "");
+	obs_data_set_bool(data, "pulse_when_active", pulseWhenActive);
 	showCondition.serialize(data, "show_condition");
 	obs_data_set_bool(data, "is_group", isGroup);
 	obs_data_set_int(data, "group_display", static_cast<int>(groupDisplay));
@@ -832,6 +833,8 @@ std::shared_ptr<ButtonConfig> ButtonConfig::deserialize(obs_data_t *data)
 	}
 	if (!config->customColor.isValid())
 		config->useCustomColor = false;
+
+	config->pulseWhenActive = obs_data_get_bool(data, "pulse_when_active");
 
 	config->showCondition = ActivationCondition::deserialize(data, "show_condition");
 

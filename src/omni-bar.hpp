@@ -40,11 +40,6 @@ class QBoxLayout;
 // sensible default for the button's action type.
 QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config, const QColor &tint, int size);
 
-// Apply a config's label, display mode, icon and colour override to a tool
-// button. Shared with the settings dialog so its preview matches the real bar.
-void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_ptr<ButtonConfig> &config,
-				  const BarStyle &style);
-
 class OmniBarButton : public QToolButton {
 	Q_OBJECT
 
@@ -69,6 +64,10 @@ public:
 	// Previews render the button whether or not its target currently exists.
 	void setPreviewMode(bool enabled);
 
+	// A preview drives the checked state by hand, so the pulse has to be
+	// re-evaluated after it does.
+	void refreshPulse();
+
 signals:
 	void expandRequested();
 	void hoverEntered();
@@ -79,6 +78,10 @@ protected:
 	void mousePressEvent(QMouseEvent *event) override;
 	void enterEvent(QEnterEvent *event) override;
 	void leaveEvent(QEvent *event) override;
+	// A collapsed group, a closed flyout or a bar set to no position leaves
+	// buttons off screen, where there is nothing to animate.
+	void showEvent(QShowEvent *event) override;
+	void hideEvent(QHideEvent *event) override;
 
 private slots:
 	void onClicked();
@@ -88,6 +91,11 @@ private:
 	void refreshVisibility();
 	void paintLabelAbove();
 
+	// The stylesheet this button carries when it is not mid-breath: its own
+	// accent override, or nothing at all so the bar's sheet applies.
+	QString restingStyleSheet() const;
+	void applyPulseFrame();
+
 	std::shared_ptr<ButtonConfig> buttonConfig;
 	bool showIndicator = false;
 	bool indicatorInteractive = false;
@@ -95,6 +103,14 @@ private:
 	bool collapsed = false;
 	bool actionValid = true;
 	bool previewMode = false;
+
+	// Style the button was last given, kept so each frame of the pulse can be
+	// built without going back to the settings.
+	BarStyle appliedStyle;
+	// Only runs while this button is actually pulsing, which is rarely more
+	// than one or two buttons at a time.
+	QTimer *pulseTimer = nullptr;
+	QString pulseSheet;
 };
 
 // A line across the bar, separating neighbouring buttons.
