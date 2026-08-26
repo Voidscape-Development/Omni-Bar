@@ -18,6 +18,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "settings-manager.hpp"
 #include "button-action.hpp"
+#include "hotkeys.hpp"
 #include <obs-module.h>
 #include <util/platform.h>
 #include <QFile>
@@ -57,7 +58,12 @@ void SettingsManager::load()
 		return;
 	}
 
-	dockPosition = static_cast<DockPosition>(obs_data_get_int(data, "dock_position"));
+	int storedPosition = static_cast<int>(obs_data_get_int(data, "dock_position"));
+	if (storedPosition >= static_cast<int>(DockPosition::Top) &&
+	    storedPosition <= static_cast<int>(DockPosition::None))
+		dockPosition = static_cast<DockPosition>(storedPosition);
+
+	OmniBarHotkeys::loadBindings(data);
 
 	obs_data_t *styleData = obs_data_get_obj(data, "style");
 	if (styleData) {
@@ -114,6 +120,8 @@ void SettingsManager::save()
 	obs_data_t *data = obs_data_create();
 
 	obs_data_set_int(data, "dock_position", static_cast<int>(dockPosition));
+
+	OmniBarHotkeys::saveBindings(data);
 
 	obs_data_t *styleData = style.serialize();
 	obs_data_set_obj(data, "style", styleData);

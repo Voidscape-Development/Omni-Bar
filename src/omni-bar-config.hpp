@@ -36,6 +36,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "bar-style.hpp"
 #include "omni-bar.hpp"
 #include "button-action.hpp"
+#include "settings-manager.hpp"
 
 class ButtonConfig;
 
@@ -177,6 +178,7 @@ private:
 	ConditionEditor *showConditionEditor = nullptr;
 	QCheckBox *customColorCheck = nullptr;
 	QPushButton *customColorButton = nullptr;
+	QCheckBox *pulseCheck = nullptr;
 
 	// Action
 	QComboBox *actionTypeCombo = nullptr;
@@ -224,6 +226,10 @@ public:
 	~OmniBarConfig();
 
 	static void showDialog();
+
+	// A hotkey can move the bar while the dialog is open. Without this the
+	// dialog would still be showing the old position and put it back on OK.
+	static void dockPositionChanged(DockPosition position);
 
 private slots:
 	void onAddButton();
@@ -277,6 +283,8 @@ private:
 	QSpinBox *buttonPaddingSpin = nullptr;
 	QSpinBox *cornerRadiusSpin = nullptr;
 	QSpinBox *borderWidthSpin = nullptr;
+	QSpinBox *pulsePeriodSpin = nullptr;
+	QSpinBox *pulseIntensitySpin = nullptr;
 	QCheckBox *useCustomColorsCheck = nullptr;
 	QWidget *colorGrid = nullptr;
 	QPushButton *barBackgroundButton = nullptr;
@@ -286,8 +294,7 @@ private:
 	QPushButton *buttonBorderButton = nullptr;
 	QPushButton *textColorButton = nullptr;
 	QWidget *stylePreviewBar = nullptr;
-	QList<QToolButton *> stylePreviewButtons;
-	QList<std::shared_ptr<ButtonConfig>> stylePreviewConfigs;
+	QList<OmniBarButton *> stylePreviewButtons;
 
 	// State
 	QList<std::shared_ptr<ButtonConfig>> workingButtons;

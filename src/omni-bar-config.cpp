@@ -232,6 +232,9 @@ void ButtonPreview::refresh(const BarStyle &style, const std::shared_ptr<ButtonC
 	previewButton->applyStyle(style);
 	previewButton->setGroupIndicator(config->isGroup, false, false);
 	previewButton->setChecked(active);
+	// The preview sets the active state by hand rather than from an action,
+	// so the pulse has to be told to catch up with it.
+	previewButton->refreshPulse();
 
 	backdropLayout->addWidget(previewButton, 0, Qt::AlignCenter);
 }
@@ -621,6 +624,14 @@ QWidget *ButtonEditDialog::createAppearanceTab()
 	colorHint->setWordWrap(true);
 	form->addRow(QString(), colorHint);
 
+	pulseCheck = new QCheckBox(obs_module_text("OmniBar.Settings.PulseWhenActive"));
+	connect(pulseCheck, &QCheckBox::toggled, this, &ButtonEditDialog::refreshPreview);
+	form->addRow(obs_module_text("OmniBar.Settings.Pulse"), pulseCheck);
+
+	QLabel *pulseHint = new QLabel(obs_module_text("OmniBar.Settings.PulseHint"));
+	pulseHint->setWordWrap(true);
+	form->addRow(QString(), pulseHint);
+
 	return page;
 }
 
@@ -834,6 +845,9 @@ void ButtonEditDialog::populateFromConfig()
 	customColorButton->setEnabled(customColorCheck->isChecked());
 	updateColorButton();
 
+	pulseCheck->setChecked(buttonConfig->pulseWhenActive);
+	pulseCheck->setEnabled(buttonConfig->hasAction());
+
 	// Icon: a bundled icon matches an entry by name, anything else is custom.
 	int iconIndex = iconCombo->findData(buttonConfig->iconPath);
 	bool isCustom = iconIndex < 0;
@@ -959,6 +973,7 @@ void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
 
 	target.useCustomColor = customColorCheck->isChecked() && customColor.isValid();
 	target.customColor = customColor;
+	target.pulseWhenActive = pulseCheck->isChecked();
 
 	QString iconData = iconCombo->currentData().toString();
 	target.iconPath = iconData == "custom" ? customIconPath : iconData;
@@ -1028,6 +1043,10 @@ void ButtonEditDialog::onActionTypeChanged(int index)
 	actionStack->setCurrentIndex(index);
 	if (allowGroup && groupCheck)
 		onGroupToggled(groupCheck->isChecked());
+	// Nothing to pulse to without an action of its own.
+	if (pulseCheck)
+		pulseCheck->setEnabled(static_cast<ActionType>(actionTypeCombo->currentData().toInt()) !=
+				       ActionType::None);
 	refreshPreview();
 }
 
@@ -1423,6 +1442,16 @@ void OmniBarConfig::showDialog()
 	instance->activateWindow();
 }
 
+void OmniBarConfig::dockPositionChanged(DockPosition position)
+{
+	if (!instance || !instance->dockPositionCombo)
+		return;
+
+	int index = instance->dockPositionCombo->findData(static_cast<int>(position));
+	if (index >= 0)
+		instance->dockPositionCombo->setCurrentIndex(index);
+}
+
 void OmniBarConfig::setupUI()
 {
 	QVBoxLayout *mainLayout = new QVBoxLayout(this);
@@ -1485,7 +1514,13 @@ QWidget *OmniBarConfig::createButtonsTab()
 	dockPositionCombo->addItem(obs_module_text("OmniBar.Position.Left"), static_cast<int>(DockPosition::Left));
 	dockPositionCombo->addItem(obs_module_text("OmniBar.Position.Bottom"), static_cast<int>(DockPosition::Bottom));
 	dockPositionCombo->addItem(obs_module_text("OmniBar.Position.Right"), static_cast<int>(DockPosition::Right));
+	dockPositionCombo->addItem(obs_module_text("OmniBar.Position.None"), static_cast<int>(DockPosition::None));
 	dockForm->addRow(obs_module_text("OmniBar.Settings.DockPosition"), dockPositionCombo);
+
+	QLabel *positionHint = new QLabel(obs_module_text("OmniBar.Settings.DockPositionHint"));
+	positionHint->setWordWrap(true);
+	dockForm->addRow(QString(), positionHint);
+
 	layout->addWidget(dockGroup);
 
 	return page;
@@ -1527,12 +1562,15 @@ QWidget *OmniBarConfig::createAppearanceTab()
 	for (const auto &sample : samples) {
 		auto config = std::make_shared<ButtonConfig>();
 		config->action = std::make_unique<FrontendAction>(sample.action);
-		stylePreviewConfigs.append(config);
+		// The active sample pulses, so the speed and intensity below can be
+		// judged by eye rather than by number.
+		config->pulseWhenActive = sample.checked;
 
-		QToolButton *button = new QToolButton(stylePreviewBar);
-		button->setCheckable(true);
+		// Real bar buttons, so the preview breathes exactly as the bar
+		// will. The button keeps the config alive.
+		OmniBarButton *button = new OmniBarButton(config, stylePreviewBar);
+		button->setPreviewMode(true);
 		button->setChecked(sample.checked);
-		button->setFocusPolicy(Qt::NoFocus);
 		button->setAttribute(Qt::WA_TransparentForMouseEvents, true);
 		previewLayout->addWidget(button);
 		stylePreviewButtons.append(button);
@@ -1557,6 +1595,32 @@ QWidget *OmniBarConfig::createAppearanceTab()
 	addSpin(cornerRadiusSpin, "OmniBar.Settings.CornerRadius", 0, 32);
 	addSpin(borderWidthSpin, "OmniBar.Settings.BorderWidth", 0, 6);
 	layout->addWidget(metricsGroup);
+
+	// Pulse
+	QGroupBox *pulseGroup = new QGroupBox(obs_module_text("OmniBar.Settings.PulseGroup"));
+	QFormLayout *pulseForm = new QFormLayout(pulseGroup);
+
+	pulsePeriodSpin = new QSpinBox();
+	pulsePeriodSpin->setRange(300, 5000);
+	pulsePeriodSpin->setSingleStep(100);
+	pulsePeriodSpin->setSuffix(" ms");
+	connect(pulsePeriodSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
+		&OmniBarConfig::onStyleValueChanged);
+	pulseForm->addRow(obs_module_text("OmniBar.Settings.PulsePeriod"), pulsePeriodSpin);
+
+	pulseIntensitySpin = new QSpinBox();
+	pulseIntensitySpin->setRange(10, 100);
+	pulseIntensitySpin->setSingleStep(5);
+	pulseIntensitySpin->setSuffix(" %");
+	connect(pulseIntensitySpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
+		&OmniBarConfig::onStyleValueChanged);
+	pulseForm->addRow(obs_module_text("OmniBar.Settings.PulseIntensity"), pulseIntensitySpin);
+
+	QLabel *pulseGroupHint = new QLabel(obs_module_text("OmniBar.Settings.PulseGroupHint"));
+	pulseGroupHint->setWordWrap(true);
+	pulseForm->addRow(QString(), pulseGroupHint);
+
+	layout->addWidget(pulseGroup);
 
 	// Colours
 	QGroupBox *colorGroup = new QGroupBox(obs_module_text("OmniBar.Settings.Colors"));
@@ -1966,6 +2030,8 @@ void OmniBarConfig::onStyleValueChanged()
 	workingStyle.buttonPadding = buttonPaddingSpin->value();
 	workingStyle.cornerRadius = cornerRadiusSpin->value();
 	workingStyle.borderWidth = borderWidthSpin->value();
+	workingStyle.pulsePeriod = pulsePeriodSpin->value();
+	workingStyle.pulseIntensity = pulseIntensitySpin->value();
 	workingStyle.useCustomColors = useCustomColorsCheck->isChecked();
 
 	// Editing any value means this is no longer one of the named looks.
@@ -2002,6 +2068,8 @@ void OmniBarConfig::updateStyleWidgets()
 	buttonPaddingSpin->setValue(workingStyle.buttonPadding);
 	cornerRadiusSpin->setValue(workingStyle.cornerRadius);
 	borderWidthSpin->setValue(workingStyle.borderWidth);
+	pulsePeriodSpin->setValue(workingStyle.pulsePeriod);
+	pulseIntensitySpin->setValue(workingStyle.pulseIntensity);
 	useCustomColorsCheck->setChecked(workingStyle.useCustomColors);
 	colorGrid->setEnabled(workingStyle.useCustomColors);
 
@@ -2028,11 +2096,10 @@ void OmniBarConfig::refreshStylePreview()
 	if (layout)
 		layout->setSpacing(workingStyle.spacing);
 
-	for (int i = 0; i < stylePreviewButtons.size() && i < stylePreviewConfigs.size(); i++) {
-		bool checked = stylePreviewButtons[i]->isChecked();
-		omniBarApplyButtonAppearance(stylePreviewButtons[i], stylePreviewConfigs[i], workingStyle);
-		stylePreviewButtons[i]->setChecked(checked);
-	}
+	// The samples keep the checked state they were built with: these buttons
+	// stand for the style, not for what OBS happens to be doing.
+	for (auto *button : stylePreviewButtons)
+		button->applyStyle(workingStyle);
 }
 
 void OmniBarConfig::onApply()

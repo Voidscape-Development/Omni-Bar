@@ -27,7 +27,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 class ButtonConfig;
 
-enum class DockPosition { Top = 0, Left = 1, Bottom = 2, Right = 3 };
+// Where the bar docks. None keeps the plugin loaded with the bar taken off the
+// window entirely, for anyone who only wants it while a hotkey calls it up. The
+// numbers are written to the configuration file, so existing ones must keep
+// their values.
+enum class DockPosition { Top = 0, Left = 1, Bottom = 2, Right = 3, None = 4 };
 
 class SettingsManager {
 public:

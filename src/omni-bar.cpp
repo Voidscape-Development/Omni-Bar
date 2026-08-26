@@ -224,8 +224,10 @@ QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config, const QC
 	return fallback.isEmpty() ? QIcon() : loadIcon(fallback, tint, size, true);
 }
 
-void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_ptr<ButtonConfig> &config,
-				  const BarStyle &style)
+// Apply a config's label, display mode, icon and colour override to a tool
+// button.
+static void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_ptr<ButtonConfig> &config,
+					 const BarStyle &style)
 {
 	if (!button || !config)
 		return;
@@ -303,7 +305,64 @@ OmniBarButton::OmniBarButton(std::shared_ptr<ButtonConfig> config, QWidget *pare
 
 void OmniBarButton::applyStyle(const BarStyle &style)
 {
+	appliedStyle = style;
 	omniBarApplyButtonAppearance(this, buttonConfig, style);
+	// The appearance pass has just reset the stylesheet, so a button that was
+	// mid-breath needs its current frame putting back.
+	refreshPulse();
+}
+
+QString OmniBarButton::restingStyleSheet() const
+{
+	if (buttonConfig && buttonConfig->useCustomColor && buttonConfig->customColor.isValid())
+		return appliedStyle.buttonAccentStyleSheet(buttonConfig->customColor);
+	return QString();
+}
+
+void OmniBarButton::applyPulseFrame()
+{
+	QColor accent = buttonConfig && buttonConfig->useCustomColor && buttonConfig->customColor.isValid()
+				? buttonConfig->customColor
+				: appliedStyle.effectiveButtonChecked();
+
+	QString sheet = appliedStyle.buttonPulseStyleSheet(accent, omniBarPulseFactor(appliedStyle));
+
+	// Most frames land on the same rounded alpha as the one before, so this
+	// keeps the restyling down to the frames that actually look different.
+	if (sheet == pulseSheet)
+		return;
+
+	pulseSheet = sheet;
+	setStyleSheet(sheet);
+}
+
+void OmniBarButton::refreshPulse()
+{
+	// Only an action can be active. A group with no action of its own uses
+	// the checked state to show that it is open, which is not something worth
+	// drawing attention to.
+	bool wanted = buttonConfig && buttonConfig->pulseWhenActive && buttonConfig->hasAction() && isChecked() &&
+		      isVisible();
+
+	if (!wanted) {
+		if (pulseTimer)
+			pulseTimer->stop();
+		if (!pulseSheet.isEmpty()) {
+			pulseSheet.clear();
+			setStyleSheet(restingStyleSheet());
+		}
+		return;
+	}
+
+	if (!pulseTimer) {
+		pulseTimer = new QTimer(this);
+		pulseTimer->setInterval(40);
+		connect(pulseTimer, &QTimer::timeout, this, &OmniBarButton::applyPulseFrame);
+	}
+
+	applyPulseFrame();
+	if (!pulseTimer->isActive())
+		pulseTimer->start();
 }
 
 void OmniBarButton::setGroupIndicator(bool visible, bool interactive, bool splitTarget)
@@ -320,12 +379,14 @@ void OmniBarButton::setCollapsed(bool value)
 		return;
 	collapsed = value;
 	refreshVisibility();
+	refreshPulse();
 }
 
 void OmniBarButton::setPreviewMode(bool enabled)
 {
 	previewMode = enabled;
 	refreshVisibility();
+	refreshPulse();
 }
 
 void OmniBarButton::refreshVisibility()
@@ -347,6 +408,8 @@ void OmniBarButton::updateState()
 	// whether they are open, so leave it to the group logic.
 	if (buttonConfig->hasAction())
 		setChecked(buttonConfig->action->isActive());
+
+	refreshPulse();
 }
 
 void OmniBarButton::onClicked()
@@ -453,6 +516,18 @@ void OmniBarButton::leaveEvent(QEvent *event)
 {
 	QToolButton::leaveEvent(event);
 	emit hoverLeft();
+}
+
+void OmniBarButton::showEvent(QShowEvent *event)
+{
+	QToolButton::showEvent(event);
+	refreshPulse();
+}
+
+void OmniBarButton::hideEvent(QHideEvent *event)
+{
+	QToolButton::hideEvent(event);
+	refreshPulse();
 }
 
 // ============================================================================
@@ -677,8 +752,19 @@ void OmniBar::repositionToolbar()
 	if (!mainWindow)
 		return;
 
+	DockPosition position = SettingsManager::getDockPosition();
+
+	if (position == DockPosition::None) {
+		// Taken off the window rather than merely hidden, so it gives its
+		// space back. The settings stay reachable from the Tools menu, and
+		// a position hotkey brings the bar back.
+		mainWindow->removeToolBar(this);
+		hide();
+		return;
+	}
+
 	Qt::ToolBarArea area;
-	switch (SettingsManager::getDockPosition()) {
+	switch (position) {
 	case DockPosition::Top:
 		area = Qt::TopToolBarArea;
 		break;

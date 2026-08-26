@@ -22,6 +22,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QMainWindow>
 #include <QAction>
 
+#include "hotkeys.hpp"
 #include "omni-bar.hpp"
 #include "omni-bar-config.hpp"
 #include "settings-manager.hpp"
@@ -31,9 +32,24 @@ OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
 static OmniBar *omniBar = nullptr;
 
+static void onFrontendEvent(enum obs_frontend_event event, void *data)
+{
+	UNUSED_PARAMETER(data);
+
+	// Hotkey bindings live in this plugin's configuration file, and nothing
+	// tells us when the user rebinds one in the OBS hotkey settings, so the
+	// file is written once more on the way out.
+	if (event == OBS_FRONTEND_EVENT_EXIT)
+		SettingsManager::save();
+}
+
 bool obs_module_load(void)
 {
 	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
+
+	// The hotkeys have to exist before the configuration that binds keys to
+	// them is read.
+	OmniBarHotkeys::registerAll();
 
 	// Load settings
 	SettingsManager::load();
@@ -60,12 +76,17 @@ bool obs_module_load(void)
 
 	obs_frontend_pop_ui_translation();
 
+	obs_frontend_add_event_callback(onFrontendEvent, nullptr);
+
 	obs_log(LOG_INFO, "OmniBar initialized");
 	return true;
 }
 
 void obs_module_unload(void)
 {
+	obs_frontend_remove_event_callback(onFrontendEvent, nullptr);
+	OmniBarHotkeys::unregisterAll();
+
 	obs_log(LOG_INFO, "plugin unloaded");
 }
 

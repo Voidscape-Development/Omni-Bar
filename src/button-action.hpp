@@ -298,6 +298,11 @@ public:
 	bool useCustomColor = false;
 	QColor customColor;
 
+	// Breathe the active fill in and out while the action is running, so a
+	// live button is noticeable without having to be looked at directly. The
+	// speed and depth of the breath are part of the bar's style.
+	bool pulseWhenActive = false;
+
 	// Group settings. Children are limited to one level deep: a child is
 	// never itself a group.
 	bool isGroup = false;
