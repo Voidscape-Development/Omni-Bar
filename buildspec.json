@@ -36,8 +36,8 @@
             "bundleId": "com.eion.obs-omni-bar"
         }
     },
-    "name": "obs-omni-bar",
-    "displayName": "OBS Omni Bar",
+    "name": "Omni-Bar",
+    "displayName": "Omni Bar",
     "version": "1.0.0",
     "author": "Eion",
     "website": "https://github.com/eion/obs-omni-bar",
