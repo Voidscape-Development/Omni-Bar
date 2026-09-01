@@ -20,6 +20,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <QToolBar>
 #include <QToolButton>
+#include <QAction>
 #include <QTimer>
 #include <QMenu>
 #include <QHash>
@@ -40,7 +41,45 @@ class QBoxLayout;
 // sensible default for the button's action type.
 QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config, const QColor &tint, int size);
 
-class OmniBarButton : public QToolButton {
+// Everything the bar puts on screen as a tool button: the buttons themselves
+// and the live readouts. Holds what the two have in common - the toolbar entry
+// that decides whether the widget is on the bar at all, and the one label
+// placement Qt cannot draw by itself.
+class OmniBarToolButton : public QToolButton {
+	Q_OBJECT
+
+public:
+	using QToolButton::QToolButton;
+
+	// The toolbar entry this widget was added with. A widget inside a
+	// QToolBar cannot hide itself - the layout shows and hides it from the
+	// entry's visibility - so everything that decides whether this widget is
+	// on the bar has to go through the entry.
+	void setBarAction(QAction *action);
+
+	// Previews render the widget whether or not it would be on the bar.
+	void setPreviewMode(bool enabled);
+
+protected:
+	// Puts the widget on the bar, or takes it off, through the entry as well
+	// as the widget itself.
+	void applyVisible(bool visible);
+
+	// Draws the frame without a label, then places the icon and text by
+	// hand. The button still carries Qt's text-under-icon style, which keeps
+	// its size hint correct.
+	void paintLabelAbove();
+
+	// Re-run whenever what the widget is showing may have changed.
+	virtual void refreshVisibility() = 0;
+
+	bool previewMode = false;
+
+private:
+	QPointer<QAction> barAction;
+};
+
+class OmniBarButton : public OmniBarToolButton {
 	Q_OBJECT
 
 public:
@@ -60,9 +99,6 @@ public:
 	// Set by the owning group when it collapses. Kept separate from action
 	// validity so a state refresh can never re-show a collapsed child.
 	void setCollapsed(bool collapsed);
-
-	// Previews render the button whether or not its target currently exists.
-	void setPreviewMode(bool enabled);
 
 	// A preview drives the checked state by hand, so the pulse has to be
 	// re-evaluated after it does.
@@ -88,8 +124,7 @@ private slots:
 
 private:
 	QRect indicatorRect() const;
-	void refreshVisibility();
-	void paintLabelAbove();
+	void refreshVisibility() override;
 
 	// The stylesheet this button carries when it is not mid-breath: its own
 	// accent override, or nothing at all so the bar's sheet applies.
@@ -102,7 +137,6 @@ private:
 	bool indicatorIsSplit = false;
 	bool collapsed = false;
 	bool actionValid = true;
-	bool previewMode = false;
 
 	// Style the button was last given, kept so each frame of the pulse can be
 	// built without going back to the settings.
@@ -111,6 +145,34 @@ private:
 	// than one or two buttons at a time.
 	QTimer *pulseTimer = nullptr;
 	QString pulseSheet;
+};
+
+// A live number on the bar - stream time, bitrate, free disk space and so on.
+// Drawn as a tool button so it picks up the bar's chrome exactly, but it never
+// reacts to the mouse and is never checked: there is nothing here to press.
+class OmniBarDisplay : public OmniBarToolButton {
+	Q_OBJECT
+
+public:
+	OmniBarDisplay(std::shared_ptr<ButtonConfig> config, QWidget *parent = nullptr);
+
+	void applyStyle(const BarStyle &style);
+
+	// Re-reads the metric and re-tests the show condition. Cheap enough to
+	// call on every tick: the text is only reapplied when it has changed.
+	void updateValue();
+
+	std::shared_ptr<ButtonConfig> getConfig() const { return displayConfig; }
+
+protected:
+	void paintEvent(QPaintEvent *event) override;
+
+private:
+	void refreshVisibility() override;
+
+	std::shared_ptr<ButtonConfig> displayConfig;
+	BarStyle appliedStyle;
+	bool conditionHolds = true;
 };
 
 // A line across the bar, separating neighbouring buttons.
@@ -176,6 +238,7 @@ public slots:
 
 private slots:
 	void onUpdateTimer();
+	void onPollTimer();
 	void onContextMenuRequested(const QPoint &pos);
 	void onConfigureClicked();
 	void onOrientationChanged(Qt::Orientation orientation);
@@ -185,10 +248,6 @@ private:
 		std::shared_ptr<ButtonConfig> config;
 		OmniBarButton *parentButton = nullptr;
 		QList<OmniBarButton *> childButtons;
-		// Inline groups collapse by hiding the toolbar actions rather
-		// than the widgets, so button validity and group collapse never
-		// fight over the same visibility flag.
-		QList<QAction *> childActions;
 		QPointer<OmniBarFlyout> flyout;
 		QTimer *hoverTimer = nullptr;
 		QElapsedTimer flyoutClosedAt;
@@ -213,6 +272,7 @@ private:
 	void scheduleUpdate();
 
 	QList<OmniBarButton *> buttons;
+	QList<OmniBarDisplay *> displays;
 	// Spacers and dividers are plain widgets rather than buttons, so their
 	// toolbar entries are tracked to follow a show condition.
 	QList<QPair<std::shared_ptr<ButtonConfig>, QAction *>> decorations;
@@ -222,6 +282,9 @@ private:
 	// creates are tracked and destroyed explicitly on rebuild.
 	QList<QAction *> barActions;
 	QTimer *updateTimer;
+	// Not everything the bar watches announces itself: a filter being
+	// switched on elsewhere, a readout counting up, free disk space falling.
+	QTimer *pollTimer;
 	QMenu *contextMenu;
 	QMainWindow *mainWindow = nullptr;
 	bool updatePending = false;

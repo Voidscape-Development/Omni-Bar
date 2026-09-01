@@ -22,6 +22,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QMainWindow>
 #include <QAction>
 
+#include "display-metrics.hpp"
 #include "hotkeys.hpp"
 #include "omni-bar.hpp"
 #include "omni-bar-config.hpp"
@@ -53,6 +54,10 @@ bool obs_module_load(void)
 
 	// Load settings
 	SettingsManager::load();
+
+	// The readouts want a first sample before any of them are built, so a
+	// Display entry has something to show from the moment it appears.
+	OmniBarMetrics::start();
 
 	// Get main window
 	QMainWindow *mainWindow = static_cast<QMainWindow *>(obs_frontend_get_main_window());
@@ -86,6 +91,7 @@ void obs_module_unload(void)
 {
 	obs_frontend_remove_event_callback(onFrontendEvent, nullptr);
 	OmniBarHotkeys::unregisterAll();
+	OmniBarMetrics::stop();
 
 	obs_log(LOG_INFO, "plugin unloaded");
 }

@@ -42,6 +42,7 @@ target_sources(
     src/omni-bar-config.cpp
     src/button-action.cpp
     src/bar-style.cpp
+    src/display-metrics.cpp
     src/hotkeys.cpp
     src/settings-manager.cpp
 )

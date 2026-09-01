@@ -145,6 +145,10 @@ std::unique_ptr<ButtonAction> ButtonAction::deserialize(obs_data_t *data)
 	} else if (type == "spacer") {
 		int width = static_cast<int>(obs_data_get_int(data, "width"));
 		return std::make_unique<SpacerAction>(width);
+	} else if (type == "display") {
+		DisplayMetric metric = OmniBarMetrics::fromName(QString::fromUtf8(obs_data_get_string(data, "metric")));
+		int width = static_cast<int>(obs_data_get_int(data, "min_width"));
+		return std::make_unique<DisplayAction>(metric, width > 0 ? width : 0);
 	} else if (type == "divider") {
 		int thickness = static_cast<int>(obs_data_get_int(data, "thickness"));
 		int length = static_cast<int>(obs_data_get_int(data, "length_percent"));
@@ -764,6 +768,33 @@ obs_data_t *DividerAction::serialize() const
 	return data;
 }
 
+// DisplayAction implementation
+DisplayAction::DisplayAction(DisplayMetric shown, int width) : metric(shown), minimumWidth(width) {}
+
+bool DisplayAction::isActive() const
+{
+	return OmniBarMetrics::isLive(metric);
+}
+
+QString DisplayAction::currentValue() const
+{
+	return OmniBarMetrics::value(metric);
+}
+
+QString DisplayAction::getDisplayName() const
+{
+	return OmniBarMetrics::label(metric);
+}
+
+obs_data_t *DisplayAction::serialize() const
+{
+	obs_data_t *data = obs_data_create();
+	obs_data_set_string(data, "type", "display");
+	obs_data_set_string(data, "metric", OmniBarMetrics::name(metric).toUtf8().constData());
+	obs_data_set_int(data, "min_width", minimumWidth);
+	return data;
+}
+
 // ButtonConfig implementation
 ButtonConfig::ButtonConfig()
 {
@@ -902,9 +933,14 @@ bool ButtonConfig::isDivider() const
 	return action && action->getType() == ActionType::Divider;
 }
 
+bool ButtonConfig::isDisplay() const
+{
+	return action && action->getType() == ActionType::Display;
+}
+
 bool ButtonConfig::isDecoration() const
 {
-	return isSpacer() || isDivider();
+	return isSpacer() || isDivider() || isDisplay();
 }
 
 bool ButtonConfig::hasAction() const
@@ -988,6 +1024,8 @@ QString ButtonConfig::summaryText() const
 	}
 
 	QString summary = action ? action->getDisplayName() : QString();
+	if (isDisplay())
+		summary = QString::fromUtf8(obs_module_text("OmniBar.Summary.Display")).arg(summary);
 	if (showCondition.isSet())
 		summary +=
 			" - " +
