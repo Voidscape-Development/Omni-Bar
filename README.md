@@ -2,7 +2,8 @@
 
 A configurable toolbar for OBS Studio. It docks to any edge of the main window and holds buttons that
 drive OBS or your sources — streaming, recording, replay buffer, virtual camera, studio mode, source
-visibility, filters and source hotkeys — with the bar and its buttons styled to taste.
+visibility, filters and source hotkeys — alongside live readouts of what OBS is doing, with the bar
+and everything on it styled to taste.
 
 Buttons light up while whatever they control is active, and hide themselves when their target no
 longer exists, so a bar built for one scene collection does not leave dead buttons behind in another.
@@ -42,14 +43,33 @@ condition — **streaming**, **recording**, **recording paused**, **replay buffe
 running**, **virtual camera running**, **studio mode on**, or the button's own
 action being active — which can be inverted to mean *while it is not*.
 
-- On a **button, spacer or divider**, the condition decides whether it appears
-  at all: a Save Replay button that shows up only once the buffer is running, or
-  a pre-flight group that disappears the moment you go live.
+- On a **button, display, spacer or divider**, the condition decides whether it
+  appears at all: a Save Replay button that shows up only once the buffer is
+  running, a stream timer that appears only while you are live, or a pre-flight
+  group that disappears the moment you go live.
 - On a **group**, it also drives expansion. With *Expand on: Condition is met*
   the group opens and closes by itself — a recording group that unfolds its
   pause and stop buttons while recording, without the group having to be a
   recording button. With *Click* or *Hover* the condition instead gates whether
   the group can be opened at all.
+
+### Displays
+
+A **Display** entry is a live number rather than a button: something to glance at while you work.
+Add one from the same menu as a button, and pick what it reads:
+
+| | |
+| --- | --- |
+| **Streaming** | Stream time, stream bitrate, dropped frames (count and percentage) |
+| **Recording** | Recording time (which stands still while the recording is paused), recording bitrate, file size so far, free space on the recording drive |
+| **Replay buffer and virtual camera** | How long each has been running, and how long since the last replay was saved |
+| **Performance** | CPU usage, frame rate, average frame time, render lag frames, encoding lag frames, memory usage, and the time of day |
+
+A display takes the same label, icon, placement and condition settings as a button — so it can carry
+a prefix such as `LIVE`, sit beside its own glyph, and appear only while it has something to say. Its
+colour setting recolours the value itself, and a **minimum width** stops the bar shuffling as the
+digits change, since digits are rarely all the same width. A readout whose feature is not running
+shows a placeholder rather than a zero.
 
 ### Layout
 
@@ -113,12 +133,14 @@ Requires OBS Studio 31.1.1 or newer.
 
 Open **Tools → Omni Bar Settings**, or right-click the bar itself and choose **Configure Omni Bar…**
 
-The **Buttons** tab lists what is on the bar. **Add** offers a button, a group, a spacer or a divider.
+The **Buttons** tab lists what is on the bar. **Add** offers a button, a group, a display, a spacer or
+a divider.
 Drag a row to reorder it, or drop it onto a group row to move it into that group. The same tab sets
 which edge of the window the bar docks to, or hides it with **None**.
 
-Double-click a row to edit it. The editor previews the button as the bar will actually draw it while
-you change its label, icon, colour and action.
+Double-click a row to edit it. The editor previews the entry as the bar will actually draw it while
+you change its label, icon, colour and action. A display previews a representative reading, so it can
+be sized and placed without having to go live first.
 
 The **Appearance** tab holds the presets and every style value, with a live preview of the bar.
 

@@ -267,6 +267,15 @@ QString BarStyle::buttonAccentStyleSheet(const QColor &accent) const
 			   effectiveButtonBorder(), effectiveTextColor());
 }
 
+QString BarStyle::displayAccentStyleSheet(const QColor &accent) const
+{
+	if (!accent.isValid())
+		return QString();
+
+	return buttonRules("QToolButton", *this, effectiveButtonBackground(), effectiveButtonHover(),
+			   effectiveButtonChecked(), effectiveButtonBorder(), accent);
+}
+
 QString BarStyle::buttonPulseStyleSheet(const QColor &accent, qreal factor) const
 {
 	QColor base = accent.isValid() ? accent : effectiveButtonChecked();

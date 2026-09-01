@@ -19,6 +19,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "omni-bar.hpp"
 #include "omni-bar-config.hpp"
 #include "button-action.hpp"
+#include "display-metrics.hpp"
 #include "settings-manager.hpp"
 #include <obs-module.h>
 #include <QMainWindow>
@@ -192,6 +193,8 @@ static QString defaultIconName(const std::shared_ptr<ButtonConfig> &config)
 		return "spacer.svg";
 	case ActionType::Divider:
 		return "divider.svg";
+	case ActionType::Display:
+		return "display.svg";
 	case ActionType::None:
 		// A container-only group reads better as a group than as nothing.
 		return config->isGroup ? "group.svg" : "none.svg";
@@ -242,15 +245,20 @@ static void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_
 		label = config->action->getDisplayName();
 	button->setText(label);
 
+	// A readout with its text hidden would have nothing left to say, so that
+	// placement is quietly treated as text only.
+	ButtonDisplayMode mode = config->displayMode;
+	if (config->isDisplay() && mode == ButtonDisplayMode::IconOnly)
+		mode = ButtonDisplayMode::TextOnly;
+
 	// Qt only lays a tool button's label out to the right of or below the
 	// icon. The other two placements are produced from those: mirroring the
-	// button moves the label to the left, and OmniBarButton paints the
+	// button moves the label to the left, and OmniBarToolButton paints the
 	// text-above case itself. Both borrow the matching Qt style so the size
 	// hint stays correct.
-	button->setLayoutDirection(config->displayMode == ButtonDisplayMode::TextLeft ? Qt::RightToLeft
-										      : Qt::LeftToRight);
+	button->setLayoutDirection(mode == ButtonDisplayMode::TextLeft ? Qt::RightToLeft : Qt::LeftToRight);
 
-	switch (config->displayMode) {
+	switch (mode) {
 	case ButtonDisplayMode::IconOnly:
 		button->setToolButtonStyle(Qt::ToolButtonIconOnly);
 		break;
@@ -270,11 +278,10 @@ static void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_
 	button->setToolTip(config->tooltip.isEmpty() ? label : config->tooltip);
 
 	int extent = style.buttonExtent();
-	if (config->displayMode == ButtonDisplayMode::IconOnly) {
+	if (mode == ButtonDisplayMode::IconOnly) {
 		button->setFixedSize(extent, extent);
 	} else {
-		bool stacked = config->displayMode == ButtonDisplayMode::TextBelow ||
-			       config->displayMode == ButtonDisplayMode::TextAbove;
+		bool stacked = mode == ButtonDisplayMode::TextBelow || mode == ButtonDisplayMode::TextAbove;
 
 		button->setMinimumSize(0, 0);
 		button->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
@@ -289,11 +296,72 @@ static void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_
 }
 
 // ============================================================================
+// OmniBarToolButton
+// ============================================================================
+
+void OmniBarToolButton::setBarAction(QAction *action)
+{
+	barAction = action;
+	// The entry starts out matching whatever the widget was doing when it
+	// was handed over, which is not necessarily what it should be doing now.
+	refreshVisibility();
+}
+
+void OmniBarToolButton::setPreviewMode(bool enabled)
+{
+	previewMode = enabled;
+	refreshVisibility();
+}
+
+void OmniBarToolButton::applyVisible(bool visible)
+{
+	// A QToolBar lays itself out from its entries, not from its widgets, and
+	// shows or hides each widget to match, so a widget in a toolbar cannot
+	// hide itself: hiding it is undone by the next relayout, and a widget
+	// already hidden when its entry was created leaves that entry invisible
+	// for good. The entry is what has to be driven.
+	if (barAction)
+		barAction->setVisible(visible);
+	setVisible(visible);
+}
+
+// Qt has no text-above-icon tool button style, so this draws the frame without
+// a label and then places the icon and text by hand. The button still carries
+// Qt's text-under-icon style, which keeps its size hint correct.
+void OmniBarToolButton::paintLabelAbove()
+{
+	QStylePainter painter(this);
+	QStyleOptionToolButton option;
+	initStyleOption(&option);
+
+	QStyleOptionToolButton frame = option;
+	frame.text.clear();
+	frame.icon = QIcon();
+	painter.drawComplexControl(QStyle::CC_ToolButton, frame);
+
+	const int gap = 4;
+	QFontMetrics metrics(font());
+	QSize icon = iconSize();
+	int textHeight = metrics.height();
+	int top = rect().top() + (rect().height() - (textHeight + gap + icon.height())) / 2;
+
+	QRect textRect(rect().left(), top, rect().width(), textHeight);
+	painter.setPen(palette().color(isEnabled() ? QPalette::Active : QPalette::Disabled, QPalette::ButtonText));
+	painter.drawText(textRect, Qt::AlignHCenter | Qt::AlignVCenter,
+			 metrics.elidedText(text(), Qt::ElideRight, textRect.width()));
+
+	QRect iconRect(rect().left() + (rect().width() - icon.width()) / 2, top + textHeight + gap, icon.width(),
+		       icon.height());
+	option.icon.paint(&painter, iconRect, Qt::AlignCenter, isEnabled() ? QIcon::Normal : QIcon::Disabled,
+			  isChecked() ? QIcon::On : QIcon::Off);
+}
+
+// ============================================================================
 // OmniBarButton
 // ============================================================================
 
 OmniBarButton::OmniBarButton(std::shared_ptr<ButtonConfig> config, QWidget *parent)
-	: QToolButton(parent),
+	: OmniBarToolButton(parent),
 	  buttonConfig(config)
 {
 	setCheckable(true);
@@ -379,19 +447,12 @@ void OmniBarButton::setCollapsed(bool value)
 		return;
 	collapsed = value;
 	refreshVisibility();
-	refreshPulse();
-}
-
-void OmniBarButton::setPreviewMode(bool enabled)
-{
-	previewMode = enabled;
-	refreshVisibility();
-	refreshPulse();
 }
 
 void OmniBarButton::refreshVisibility()
 {
-	setVisible(previewMode || (actionValid && !collapsed));
+	applyVisible(previewMode || (actionValid && !collapsed));
+	refreshPulse();
 }
 
 void OmniBarButton::updateState()
@@ -423,37 +484,6 @@ QRect OmniBarButton::indicatorRect() const
 {
 	int extent = qMax(7, qMin(width(), height()) / 4);
 	return QRect(width() - extent - 2, height() - extent - 2, extent, extent);
-}
-
-// Qt has no text-above-icon tool button style, so this draws the frame without
-// a label and then places the icon and text by hand. The button still carries
-// Qt's text-under-icon style, which keeps its size hint correct.
-void OmniBarButton::paintLabelAbove()
-{
-	QStylePainter painter(this);
-	QStyleOptionToolButton option;
-	initStyleOption(&option);
-
-	QStyleOptionToolButton frame = option;
-	frame.text.clear();
-	frame.icon = QIcon();
-	painter.drawComplexControl(QStyle::CC_ToolButton, frame);
-
-	const int gap = 4;
-	QFontMetrics metrics(font());
-	QSize icon = iconSize();
-	int textHeight = metrics.height();
-	int top = rect().top() + (rect().height() - (textHeight + gap + icon.height())) / 2;
-
-	QRect textRect(rect().left(), top, rect().width(), textHeight);
-	painter.setPen(palette().color(isEnabled() ? QPalette::Active : QPalette::Disabled, QPalette::ButtonText));
-	painter.drawText(textRect, Qt::AlignHCenter | Qt::AlignVCenter,
-			 metrics.elidedText(text(), Qt::ElideRight, textRect.width()));
-
-	QRect iconRect(rect().left() + (rect().width() - icon.width()) / 2, top + textHeight + gap, icon.width(),
-		       icon.height());
-	option.icon.paint(&painter, iconRect, Qt::AlignCenter, isEnabled() ? QIcon::Normal : QIcon::Disabled,
-			  isChecked() ? QIcon::On : QIcon::Off);
 }
 
 void OmniBarButton::paintEvent(QPaintEvent *event)
@@ -528,6 +558,89 @@ void OmniBarButton::hideEvent(QHideEvent *event)
 {
 	QToolButton::hideEvent(event);
 	refreshPulse();
+}
+
+// ============================================================================
+// OmniBarDisplay
+// ============================================================================
+
+OmniBarDisplay::OmniBarDisplay(std::shared_ptr<ButtonConfig> config, QWidget *parent)
+	: OmniBarToolButton(parent),
+	  displayConfig(config)
+{
+	setCheckable(false);
+	setFocusPolicy(Qt::NoFocus);
+	// A number to read, not a control: it must not light up under the mouse
+	// or take a click meant for the OBS window behind it.
+	setAttribute(Qt::WA_TransparentForMouseEvents, true);
+	setToolButtonStyle(Qt::ToolButtonTextOnly);
+
+	applyStyle(SettingsManager::getStyle());
+}
+
+void OmniBarDisplay::applyStyle(const BarStyle &style)
+{
+	appliedStyle = style;
+	omniBarApplyButtonAppearance(this, displayConfig, style);
+
+	// The shared pass puts a button's accent override on; on a readout that
+	// colour belongs to the text instead, since there is no hover or active
+	// state here for it to land on.
+	if (displayConfig && displayConfig->useCustomColor && displayConfig->customColor.isValid())
+		setStyleSheet(style.displayAccentStyleSheet(displayConfig->customColor));
+
+	// The appearance pass writes the configured label; the reading goes back
+	// over the top of it.
+	updateValue();
+}
+
+void OmniBarDisplay::updateValue()
+{
+	if (!displayConfig)
+		return;
+
+	auto *display = dynamic_cast<DisplayAction *>(displayConfig->action.get());
+	if (!display)
+		return;
+
+	QString reading = previewMode ? OmniBarMetrics::previewValue(display->getMetric()) : display->currentValue();
+
+	// The configured label reads as a prefix - "Live 01:23:45" - so a row of
+	// readouts can say what each number is without a tooltip. Nothing below
+	// is reapplied unless it has actually changed: this runs on every tick,
+	// and each of these would otherwise ask for a fresh layout twice a
+	// second for the whole life of the bar.
+	QString text = displayConfig->label.isEmpty() ? reading : displayConfig->label + QLatin1Char(' ') + reading;
+	if (text != this->text())
+		setText(text);
+
+	if (displayConfig->tooltip.isEmpty()) {
+		QString tip = OmniBarMetrics::label(display->getMetric());
+		if (tip != toolTip())
+			setToolTip(tip);
+	}
+
+	// Digits are rarely all the same width, so a timer left to fit its own
+	// content nudges everything beside it along as it counts.
+	int floor = qMax(0, display->getMinimumWidth());
+	if (minimumWidth() != floor)
+		setMinimumWidth(floor);
+
+	conditionHolds = displayConfig->showCondition.isSatisfied(displayConfig->action.get());
+	refreshVisibility();
+}
+
+void OmniBarDisplay::refreshVisibility()
+{
+	applyVisible(previewMode || conditionHolds);
+}
+
+void OmniBarDisplay::paintEvent(QPaintEvent *event)
+{
+	if (displayConfig && displayConfig->displayMode == ButtonDisplayMode::TextAbove)
+		paintLabelAbove();
+	else
+		QToolButton::paintEvent(event);
 }
 
 // ============================================================================
@@ -698,6 +811,15 @@ OmniBar::OmniBar(QWidget *parent) : QToolBar(parent)
 	updateTimer->setInterval(50);
 	connect(updateTimer, &QTimer::timeout, this, &OmniBar::onUpdateTimer);
 
+	// Frontend events cover starting and stopping, but nothing announces a
+	// filter being switched on elsewhere or a timer ticking over, so the bar
+	// also looks for itself. Slow enough to be free, quick enough that a
+	// readout never visibly lags.
+	pollTimer = new QTimer(this);
+	pollTimer->setInterval(500);
+	connect(pollTimer, &QTimer::timeout, this, &OmniBar::onPollTimer);
+	pollTimer->start();
+
 	// Spacers and dividers are laid out along the bar, so they have to be
 	// rebuilt whenever it turns. The bar is built before it is docked, so
 	// this also covers the initial move into a left or right dock.
@@ -832,6 +954,7 @@ void OmniBar::clearButtons()
 	groups.clear();
 
 	buttons.clear();
+	displays.clear();
 	decorations.clear();
 	activeConfigs.clear();
 
@@ -888,8 +1011,22 @@ void OmniBar::createButtonsFromConfig()
 			continue;
 		}
 
+		if (config->isDisplay()) {
+			auto *display = new OmniBarDisplay(config, this);
+			QAction *displayEntry = addWidget(display);
+			barActions.append(displayEntry);
+			// A readout keeps its own entry rather than joining the
+			// decorations: it has a reading to refresh as well as a
+			// condition to follow.
+			display->setBarAction(displayEntry);
+			displays.append(display);
+			continue;
+		}
+
 		OmniBarButton *button = createButton(config);
-		barActions.append(addWidget(button));
+		QAction *buttonEntry = addWidget(button);
+		barActions.append(buttonEntry);
+		button->setBarAction(buttonEntry);
 		buttons.append(button);
 
 		if (!config->isGroup || config->children.isEmpty())
@@ -931,10 +1068,11 @@ void OmniBar::buildGroup(GroupRuntime *group)
 
 		if (isInline) {
 			QAction *action = addWidget(child);
-			action->setVisible(false);
-			child->setCollapsed(true);
-			group->childActions.append(action);
 			barActions.append(action);
+			// Collapsed first, so the entry is created hidden rather
+			// than flashing onto the bar for one layout pass.
+			child->setCollapsed(true);
+			child->setBarAction(action);
 		} else {
 			group->flyout->addButton(child);
 		}
@@ -1030,13 +1168,10 @@ void OmniBar::setGroupExpanded(GroupRuntime *group, bool expanded)
 	group->expanded = expanded;
 
 	if (group->config->groupDisplay == GroupDisplayMode::Inline) {
-		// Both flags are needed: the action drives the toolbar layout,
-		// the widget flag stops a state refresh re-showing the child.
-		for (int i = 0; i < group->childActions.size(); i++) {
-			group->childActions[i]->setVisible(expanded);
-			if (i < group->childButtons.size())
-				group->childButtons[i]->setCollapsed(!expanded);
-		}
+		// Each child puts itself on and off the bar, so a child whose own
+		// show condition has stopped holding stays off even here.
+		for (auto *child : group->childButtons)
+			child->setCollapsed(!expanded);
 	} else if (group->flyout) {
 		if (expanded) {
 			group->flyout->applyStyle(SettingsManager::getStyle());
@@ -1075,6 +1210,10 @@ void OmniBar::updateButtonStates()
 		button->updateState();
 	}
 
+	for (auto *display : displays) {
+		display->updateValue();
+	}
+
 	for (auto &group : groups) {
 		const auto &config = group->config;
 		bool holds = groupConditionHolds(group.get());
@@ -1107,6 +1246,18 @@ void OmniBar::scheduleUpdate()
 void OmniBar::onUpdateTimer()
 {
 	updatePending = false;
+	updateButtonStates();
+}
+
+void OmniBar::onPollTimer()
+{
+	// Sampled even while the bar is off the window, so the rates the
+	// readouts show are already settled when it comes back.
+	OmniBarMetrics::sample();
+
+	if (!isVisible())
+		return;
+
 	updateButtonStates();
 }
 

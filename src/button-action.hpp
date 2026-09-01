@@ -26,10 +26,12 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <memory>
 #include <QList>
 
+#include "display-metrics.hpp"
+
 // Forward declaration
 class ButtonConfig;
 
-enum class ActionType { None, Frontend, SourceHotkey, SourceFilter, SourceVisibility, Spacer, Divider };
+enum class ActionType { None, Frontend, SourceHotkey, SourceFilter, SourceVisibility, Spacer, Divider, Display };
 
 enum class FrontendActionType {
 	StartStreaming,
@@ -273,6 +275,38 @@ private:
 	QColor color;
 };
 
+// A live readout on the bar rather than something to press: how long the stream
+// has been up, what the recording is costing in bitrate, and so on. The value
+// is collected by OmniBarMetrics; this only says which one to show.
+class DisplayAction : public ButtonAction {
+public:
+	DisplayAction(DisplayMetric metric = DisplayMetric::StreamTime, int minimumWidth = 0);
+
+	ActionType getType() const override { return ActionType::Display; }
+	void execute() override {}
+	// Reports whether the metric has anything live behind it, which is what
+	// makes "only while this entry's own value is live" a usable condition.
+	bool isActive() const override;
+	QString getDisplayName() const override;
+	obs_data_t *serialize() const override;
+
+	DisplayMetric getMetric() const { return metric; }
+	void setMetric(DisplayMetric value) { metric = value; }
+
+	// Floor for the entry's width, in pixels. Digits are not all the same
+	// width in every font, so a timer that is free to shrink shuffles its
+	// neighbours about as it counts. Zero fits the content.
+	int getMinimumWidth() const { return minimumWidth; }
+	void setMinimumWidth(int value) { minimumWidth = value; }
+
+	// Reading as it stands right now, formatted for the bar.
+	QString currentValue() const;
+
+private:
+	DisplayMetric metric;
+	int minimumWidth;
+};
+
 // Button configuration class
 class ButtonConfig {
 public:
@@ -319,8 +353,11 @@ public:
 	bool isValid() const;
 	bool isSpacer() const;
 	bool isDivider() const;
+	bool isDisplay() const;
 
-	// True for entries that are bar decoration rather than a button.
+	// True for entries that are part of the bar rather than a button to
+	// press. These are laid out along the bar, never go inside a group, and
+	// have no active state of their own to pulse.
 	bool isDecoration() const;
 
 	// True when the button runs something of its own, as opposed to a group

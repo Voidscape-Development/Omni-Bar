@@ -93,12 +93,12 @@ public:
 private:
 	QWidget *backdrop;
 	QBoxLayout *backdropLayout;
-	// A real bar button, so placements the bar draws itself - such as a label
+	// A real bar widget, so placements the bar draws itself - such as a label
 	// above the icon - show up here too.
-	OmniBarButton *previewButton = nullptr;
+	QWidget *previewWidget = nullptr;
 };
 
-// Editor for a single button, group or spacer.
+// Editor for a single button, group, spacer, divider or readout.
 class ButtonEditDialog : public QDialog {
 	Q_OBJECT
 
@@ -134,6 +134,7 @@ private:
 	void setupSpacerUI();
 	void setupDividerUI();
 	void buildIconCombo();
+	void buildMetricCombo();
 	QWidget *createAppearanceTab();
 	QWidget *createActionTab();
 	QWidget *createGroupTab();
@@ -158,6 +159,10 @@ private:
 	bool allowGroup;
 	bool spacerMode;
 	bool dividerMode;
+	// A readout keeps the full editor - it has a label, an icon and a
+	// condition like any other entry - with the action tab replaced by the
+	// choice of what it reads.
+	bool displayEntryMode;
 	QString customIconPath;
 	QColor customColor;
 	QColor dividerColor;
@@ -191,6 +196,10 @@ private:
 	QComboBox *visibilitySceneCombo = nullptr;
 	QComboBox *visibilitySourceCombo = nullptr;
 	QSpinBox *spacerWidthSpin = nullptr;
+
+	// Display
+	QComboBox *displayMetricCombo = nullptr;
+	QSpinBox *displayWidthSpin = nullptr;
 
 	// Divider
 	QSpinBox *dividerThicknessSpin = nullptr;

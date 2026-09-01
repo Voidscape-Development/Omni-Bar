@@ -75,6 +75,11 @@ struct BarStyle {
 	// toolbar's sheet for the same properties.
 	QString buttonAccentStyleSheet(const QColor &accent) const;
 
+	// Stylesheet for a readout given a colour of its own. A readout has no
+	// hover or active state to recolour, so the colour goes on the text -
+	// which is the whole of what it draws.
+	QString displayAccentStyleSheet(const QColor &accent) const;
+
 	// Stylesheet for a single button whose active fill is mid-breath. accent
 	// is the colour that button uses when active - the shared one, or its own
 	// override - and factor scales how much of it is showing, 0 to 1.

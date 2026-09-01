@@ -19,6 +19,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "omni-bar-config.hpp"
 #include "omni-bar.hpp"
 #include "button-action.hpp"
+#include "display-metrics.hpp"
 #include "settings-manager.hpp"
 #include <obs-module.h>
 #include <obs-frontend-api.h>
@@ -44,6 +45,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 static const int kConfigIdRole = Qt::UserRole;
 static const int kConfigIsGroupRole = Qt::UserRole + 1;
+// Spacers, dividers and readouts are part of the bar itself, so they never go
+// inside a group - a group would only drop them on the floor when it built its
+// children.
+static const int kConfigIsDecorationRole = Qt::UserRole + 2;
 
 // Paint a colour swatch onto a button and label it with its hex value.
 static void setColorSwatch(QPushButton *button, const QColor &color)
@@ -161,6 +166,9 @@ bool ButtonTreeWidget::isDropAllowed(QTreeWidgetItem *source, QTreeWidgetItem *t
 		return false;
 
 	bool sourceIsGroup = source->data(0, kConfigIsGroupRole).toBool();
+	bool sourceIsDecoration = source->data(0, kConfigIsDecorationRole).toBool();
+	// Neither a group nor a piece of the bar can go inside a group.
+	bool nestable = !sourceIsGroup && !sourceIsDecoration;
 
 	if (position == OnItem) {
 		if (!target || target == source)
@@ -169,7 +177,7 @@ bool ButtonTreeWidget::isDropAllowed(QTreeWidgetItem *source, QTreeWidgetItem *t
 			return false;
 		// Groups only nest one level deep, so a group can never be
 		// dropped inside another group.
-		return !sourceIsGroup && target->parent() == nullptr;
+		return nestable && target->parent() == nullptr;
 	}
 
 	if (position == OnViewport)
@@ -177,7 +185,7 @@ bool ButtonTreeWidget::isDropAllowed(QTreeWidgetItem *source, QTreeWidgetItem *t
 
 	// Dropping between a group's children lands the item in that group.
 	if (target && target->parent() != nullptr)
-		return !sourceIsGroup;
+		return nestable;
 
 	return true;
 }
@@ -222,21 +230,34 @@ void ButtonPreview::refresh(const BarStyle &style, const std::shared_ptr<ButtonC
 
 	backdrop->setStyleSheet(style.panelStyleSheet(QStringLiteral("OmniBarPreviewBackdrop")));
 
-	// Rebuilt rather than restyled: a bar button takes its config in the
+	// Rebuilt rather than restyled: a bar widget takes its config in the
 	// constructor, and using the real class is what keeps the preview honest.
-	delete previewButton;
-	previewButton = new OmniBarButton(config, backdrop);
-	previewButton->setPreviewMode(true);
-	// A picture of a button, not a working one.
-	previewButton->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-	previewButton->applyStyle(style);
-	previewButton->setGroupIndicator(config->isGroup, false, false);
-	previewButton->setChecked(active);
-	// The preview sets the active state by hand rather than from an action,
-	// so the pulse has to be told to catch up with it.
-	previewButton->refreshPulse();
+	delete previewWidget;
+	previewWidget = nullptr;
 
-	backdropLayout->addWidget(previewButton, 0, Qt::AlignCenter);
+	if (config->isDisplay()) {
+		// Preview mode puts a representative reading in, so the entry
+		// can be judged for width and placement even when nothing is
+		// streaming.
+		auto *display = new OmniBarDisplay(config, backdrop);
+		display->setPreviewMode(true);
+		display->applyStyle(style);
+		previewWidget = display;
+	} else {
+		auto *button = new OmniBarButton(config, backdrop);
+		button->setPreviewMode(true);
+		// A picture of a button, not a working one.
+		button->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+		button->applyStyle(style);
+		button->setGroupIndicator(config->isGroup, false, false);
+		button->setChecked(active);
+		// The preview sets the active state by hand rather than from an
+		// action, so the pulse has to be told to catch up with it.
+		button->refreshPulse();
+		previewWidget = button;
+	}
+
+	backdropLayout->addWidget(previewWidget, 0, Qt::AlignCenter);
 }
 
 // ============================================================================
@@ -250,12 +271,20 @@ ButtonEditDialog::ButtonEditDialog(std::shared_ptr<ButtonConfig> config, const B
 	  style(barStyle),
 	  allowGroup(groupAllowed),
 	  spacerMode(config && config->isSpacer()),
-	  dividerMode(config && config->isDivider())
+	  dividerMode(config && config->isDivider()),
+	  displayEntryMode(config && config->isDisplay())
 {
+	// A readout is part of the bar rather than a button, so it never becomes
+	// a group whatever the caller asked for.
+	if (displayEntryMode)
+		allowGroup = false;
+
 	if (spacerMode)
 		setWindowTitle(obs_module_text("OmniBar.Settings.EditSpacer"));
 	else if (dividerMode)
 		setWindowTitle(obs_module_text("OmniBar.Settings.EditDivider"));
+	else if (displayEntryMode)
+		setWindowTitle(obs_module_text("OmniBar.Settings.EditDisplay"));
 	else
 		setWindowTitle(obs_module_text("OmniBar.Settings.EditButton"));
 
@@ -263,6 +292,8 @@ ButtonEditDialog::ButtonEditDialog(std::shared_ptr<ButtonConfig> config, const B
 		setupSpacerUI();
 	} else if (dividerMode) {
 		setupDividerUI();
+	} else if (displayEntryMode) {
+		setupUI();
 	} else {
 		setupUI();
 		populateSources();
@@ -444,7 +475,8 @@ void ButtonEditDialog::setupUI()
 	// Right pane: everything that can be configured.
 	tabs = new QTabWidget();
 	tabs->addTab(createAppearanceTab(), obs_module_text("OmniBar.Settings.TabAppearance"));
-	tabs->addTab(createActionTab(), obs_module_text("OmniBar.Settings.TabAction"));
+	tabs->addTab(createActionTab(),
+		     obs_module_text(displayEntryMode ? "OmniBar.Settings.TabValue" : "OmniBar.Settings.TabAction"));
 	if (allowGroup) {
 		groupTabIndex = tabs->addTab(createGroupTab(), obs_module_text("OmniBar.Settings.TabGroup"));
 	}
@@ -526,6 +558,7 @@ void ButtonEditDialog::buildIconCombo()
 	addHeader("OmniBar.IconGroup.Other");
 	addEntry("OmniBar.Icon.Group", "group.svg", true);
 	addEntry("OmniBar.Icon.None", "none.svg", true);
+	addEntry("OmniBar.Icon.Display", "display.svg", true);
 	addEntry("OmniBar.Icon.Divider", "divider.svg", true);
 	addEntry("OmniBar.Icon.Spacer", "spacer.svg", true);
 	addEntry("OmniBar.Icon.Custom", "custom", false);
@@ -537,19 +570,76 @@ void ButtonEditDialog::buildIconCombo()
 	iconCombo->view()->setMinimumWidth(260);
 }
 
+// Grouped the same way the icon list is, so a readout is found by what it
+// belongs to rather than by reading seventeen names in a row.
+void ButtonEditDialog::buildMetricCombo()
+{
+	QStandardItemModel *model = new QStandardItemModel(displayMetricCombo);
+
+	auto addHeader = [&](const char *labelKey) {
+		QStandardItem *item = new QStandardItem(obs_module_text(labelKey));
+		item->setFlags(Qt::NoItemFlags);
+		QFont font = item->font();
+		font.setBold(true);
+		item->setFont(font);
+		model->appendRow(item);
+	};
+
+	auto addEntry = [&](DisplayMetric metric) {
+		QStandardItem *item = new QStandardItem(OmniBarMetrics::label(metric));
+		item->setData(OmniBarMetrics::name(metric), Qt::UserRole);
+		model->appendRow(item);
+	};
+
+	addHeader("OmniBar.MetricGroup.Streaming");
+	addEntry(DisplayMetric::StreamTime);
+	addEntry(DisplayMetric::StreamBitrate);
+	addEntry(DisplayMetric::StreamDropped);
+
+	addHeader("OmniBar.MetricGroup.Recording");
+	addEntry(DisplayMetric::RecordTime);
+	addEntry(DisplayMetric::RecordBitrate);
+	addEntry(DisplayMetric::RecordSize);
+	addEntry(DisplayMetric::DiskFree);
+
+	addHeader("OmniBar.MetricGroup.Buffers");
+	addEntry(DisplayMetric::ReplayTime);
+	addEntry(DisplayMetric::ReplayLastSaved);
+	addEntry(DisplayMetric::VirtualCamTime);
+
+	addHeader("OmniBar.MetricGroup.Performance");
+	addEntry(DisplayMetric::CpuUsage);
+	addEntry(DisplayMetric::Fps);
+	addEntry(DisplayMetric::FrameTime);
+	addEntry(DisplayMetric::RenderLag);
+	addEntry(DisplayMetric::EncodingLag);
+	addEntry(DisplayMetric::Memory);
+	addEntry(DisplayMetric::Clock);
+
+	displayMetricCombo->setModel(model);
+	displayMetricCombo->view()->setMinimumWidth(240);
+	// Row zero is a heading, which is not something to sit on.
+	displayMetricCombo->setCurrentIndex(1);
+}
+
 QWidget *ButtonEditDialog::createAppearanceTab()
 {
 	QWidget *page = new QWidget();
 	QFormLayout *form = new QFormLayout(page);
 
 	labelEdit = new QLineEdit();
-	labelEdit->setPlaceholderText(obs_module_text("OmniBar.Settings.LabelPlaceholder"));
+	labelEdit->setPlaceholderText(obs_module_text(displayEntryMode ? "OmniBar.Settings.PrefixPlaceholder"
+								       : "OmniBar.Settings.LabelPlaceholder"));
 	connect(labelEdit, &QLineEdit::textChanged, this, &ButtonEditDialog::refreshPreview);
-	form->addRow(obs_module_text("OmniBar.Settings.Label"), labelEdit);
+	form->addRow(obs_module_text(displayEntryMode ? "OmniBar.Settings.Prefix" : "OmniBar.Settings.Label"),
+		     labelEdit);
 
 	displayModeCombo = new QComboBox();
-	displayModeCombo->addItem(obs_module_text("OmniBar.Display.IconOnly"),
-				  static_cast<int>(ButtonDisplayMode::IconOnly));
+	// A readout with its text hidden would have nothing left to show, so
+	// icon-only is not on offer for one.
+	if (!displayEntryMode)
+		displayModeCombo->addItem(obs_module_text("OmniBar.Display.IconOnly"),
+					  static_cast<int>(ButtonDisplayMode::IconOnly));
 	displayModeCombo->addItem(obs_module_text("OmniBar.Display.TextOnly"),
 				  static_cast<int>(ButtonDisplayMode::TextOnly));
 	displayModeCombo->addItem(obs_module_text("OmniBar.Display.TextLeft"),
@@ -618,11 +708,17 @@ QWidget *ButtonEditDialog::createAppearanceTab()
 	connect(customColorButton, &QPushButton::clicked, this, &ButtonEditDialog::onCustomColorClicked);
 	colorLayout->addWidget(customColorButton, 1);
 
-	form->addRow(obs_module_text("OmniBar.Settings.AccentColor"), colorLayout);
+	form->addRow(obs_module_text(displayEntryMode ? "OmniBar.Settings.TextColour" : "OmniBar.Settings.AccentColor"),
+		     colorLayout);
 
-	QLabel *colorHint = new QLabel(obs_module_text("OmniBar.Settings.AccentColorHint"));
+	QLabel *colorHint = new QLabel(obs_module_text(displayEntryMode ? "OmniBar.Settings.TextColourHint"
+									: "OmniBar.Settings.AccentColorHint"));
 	colorHint->setWordWrap(true);
 	form->addRow(QString(), colorHint);
+
+	// Nothing to breathe with: a readout has no active state of its own.
+	if (displayEntryMode)
+		return page;
 
 	pulseCheck = new QCheckBox(obs_module_text("OmniBar.Settings.PulseWhenActive"));
 	connect(pulseCheck, &QCheckBox::toggled, this, &ButtonEditDialog::refreshPreview);
@@ -639,6 +735,31 @@ QWidget *ButtonEditDialog::createActionTab()
 {
 	QWidget *page = new QWidget();
 	QVBoxLayout *layout = new QVBoxLayout(page);
+
+	// A readout has one thing to choose - what it reads - so it gets this tab
+	// to itself rather than a type picker over a stack of one.
+	if (displayEntryMode) {
+		QFormLayout *displayForm = new QFormLayout();
+
+		displayMetricCombo = new QComboBox();
+		buildMetricCombo();
+		connect(displayMetricCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+			&ButtonEditDialog::refreshPreview);
+		displayForm->addRow(obs_module_text("OmniBar.Settings.DisplayMetric"), displayMetricCombo);
+
+		displayWidthSpin = new QSpinBox();
+		displayWidthSpin->setRange(0, 400);
+		displayWidthSpin->setSuffix(" px");
+		displayWidthSpin->setSpecialValueText(obs_module_text("OmniBar.Settings.DisplayWidthAuto"));
+		displayWidthSpin->setToolTip(obs_module_text("OmniBar.Settings.DisplayWidthHint"));
+		connect(displayWidthSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
+			&ButtonEditDialog::refreshPreview);
+		displayForm->addRow(obs_module_text("OmniBar.Settings.DisplayWidth"), displayWidthSpin);
+
+		layout->addLayout(displayForm);
+		layout->addStretch();
+		return page;
+	}
 
 	QFormLayout *typeForm = new QFormLayout();
 	actionTypeCombo = new QComboBox();
@@ -845,8 +966,10 @@ void ButtonEditDialog::populateFromConfig()
 	customColorButton->setEnabled(customColorCheck->isChecked());
 	updateColorButton();
 
-	pulseCheck->setChecked(buttonConfig->pulseWhenActive);
-	pulseCheck->setEnabled(buttonConfig->hasAction());
+	if (pulseCheck) {
+		pulseCheck->setChecked(buttonConfig->pulseWhenActive);
+		pulseCheck->setEnabled(buttonConfig->hasAction());
+	}
 
 	// Icon: a bundled icon matches an entry by name, anything else is custom.
 	int iconIndex = iconCombo->findData(buttonConfig->iconPath);
@@ -881,6 +1004,17 @@ void ButtonEditDialog::populateFromConfig()
 
 	if (!buttonConfig->action)
 		return;
+
+	if (displayEntryMode) {
+		auto *display = dynamic_cast<DisplayAction *>(buttonConfig->action.get());
+		if (display) {
+			int metricIndex = displayMetricCombo->findData(OmniBarMetrics::name(display->getMetric()));
+			if (metricIndex >= 0)
+				displayMetricCombo->setCurrentIndex(metricIndex);
+			displayWidthSpin->setValue(display->getMinimumWidth());
+		}
+		return;
+	}
 
 	ActionType type = buttonConfig->action->getType();
 	int typeIndex = actionTypeCombo->findData(static_cast<int>(type));
@@ -944,6 +1078,7 @@ void ButtonEditDialog::populateFromConfig()
 	case ActionType::None:
 	case ActionType::Spacer:
 	case ActionType::Divider:
+	case ActionType::Display:
 		break;
 	}
 }
@@ -973,10 +1108,19 @@ void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
 
 	target.useCustomColor = customColorCheck->isChecked() && customColor.isValid();
 	target.customColor = customColor;
-	target.pulseWhenActive = pulseCheck->isChecked();
+	target.pulseWhenActive = pulseCheck && pulseCheck->isChecked();
 
 	QString iconData = iconCombo->currentData().toString();
 	target.iconPath = iconData == "custom" ? customIconPath : iconData;
+
+	if (displayEntryMode) {
+		target.isGroup = false;
+		target.children.clear();
+		target.action = std::make_unique<DisplayAction>(
+			OmniBarMetrics::fromName(displayMetricCombo->currentData().toString()),
+			displayWidthSpin->value());
+		return;
+	}
 
 	if (allowGroup) {
 		target.isGroup = groupCheck->isChecked();
@@ -1019,6 +1163,10 @@ void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
 		break;
 	case ActionType::Divider:
 		target.action = std::make_unique<DividerAction>();
+		break;
+	case ActionType::Display:
+		// Not offered in the type list: a readout is added as its own
+		// kind of entry and handled above.
 		break;
 	}
 }
@@ -1517,10 +1665,6 @@ QWidget *OmniBarConfig::createButtonsTab()
 	dockPositionCombo->addItem(obs_module_text("OmniBar.Position.None"), static_cast<int>(DockPosition::None));
 	dockForm->addRow(obs_module_text("OmniBar.Settings.DockPosition"), dockPositionCombo);
 
-	QLabel *positionHint = new QLabel(obs_module_text("OmniBar.Settings.DockPositionHint"));
-	positionHint->setWordWrap(true);
-	dockForm->addRow(QString(), positionHint);
-
 	layout->addWidget(dockGroup);
 
 	return page;
@@ -1615,10 +1759,6 @@ QWidget *OmniBarConfig::createAppearanceTab()
 	connect(pulseIntensitySpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
 		&OmniBarConfig::onStyleValueChanged);
 	pulseForm->addRow(obs_module_text("OmniBar.Settings.PulseIntensity"), pulseIntensitySpin);
-
-	QLabel *pulseGroupHint = new QLabel(obs_module_text("OmniBar.Settings.PulseGroupHint"));
-	pulseGroupHint->setWordWrap(true);
-	pulseForm->addRow(QString(), pulseGroupHint);
 
 	layout->addWidget(pulseGroup);
 
@@ -1721,6 +1861,7 @@ QTreeWidgetItem *OmniBarConfig::createTreeItem(const std::shared_ptr<ButtonConfi
 	item->setIcon(0, omniBarIconForConfig(config, palette().color(QPalette::Text), 16));
 	item->setData(0, kConfigIdRole, config->id);
 	item->setData(0, kConfigIsGroupRole, config->isGroup);
+	item->setData(0, kConfigIsDecorationRole, config->isDecoration());
 
 	Qt::ItemFlags flags = Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled;
 	// Only groups accept a drop, which is what caps nesting at one level.
@@ -1848,6 +1989,7 @@ void OmniBarConfig::onAddButton()
 	QMenu menu(this);
 	QAction *buttonAction = menu.addAction(obs_module_text("OmniBar.Settings.AddPlainButton"));
 	QAction *groupAction = menu.addAction(obs_module_text("OmniBar.Settings.AddGroup"));
+	QAction *displayAction = menu.addAction(obs_module_text("OmniBar.Settings.AddDisplay"));
 	QAction *spacerAction = menu.addAction(obs_module_text("OmniBar.Settings.AddSpacer"));
 	QAction *dividerAction = menu.addAction(obs_module_text("OmniBar.Settings.AddDivider"));
 
@@ -1857,11 +1999,16 @@ void OmniBarConfig::onAddButton()
 
 	auto config = std::make_shared<ButtonConfig>();
 
-	if (chosen == spacerAction || chosen == dividerAction) {
-		if (chosen == spacerAction)
+	if (chosen == spacerAction || chosen == dividerAction || chosen == displayAction) {
+		if (chosen == spacerAction) {
 			config->action = std::make_unique<SpacerAction>(10);
-		else
+		} else if (chosen == dividerAction) {
 			config->action = std::make_unique<DividerAction>();
+		} else {
+			config->action = std::make_unique<DisplayAction>(DisplayMetric::StreamTime);
+			// A number wants its own room, not an icon's square.
+			config->displayMode = ButtonDisplayMode::TextOnly;
+		}
 
 		ButtonEditDialog dialog(config, workingStyle, false, this);
 		if (dialog.exec() == QDialog::Accepted)
