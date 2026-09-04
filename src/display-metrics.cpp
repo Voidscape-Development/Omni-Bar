@@ -223,6 +223,15 @@ const MetricNames kMetricNames[] = {
 	{DisplayMetric::Memory, "memory", "OmniBar.Metric.Memory"},
 	{DisplayMetric::Clock, "clock", "OmniBar.Metric.Clock"}};
 
+// Both formats carry seconds, matching the run timers beside them on the bar,
+// and the 12-hour one carries a suffix so morning and afternoon cannot be
+// mistaken for one another.
+QString formatClock(ClockFormat format)
+{
+	return QTime::currentTime().toString(format == ClockFormat::Hours12 ? QStringLiteral("h:mm:ss AP")
+									    : QStringLiteral("HH:mm:ss"));
+}
+
 } // namespace
 
 void OmniBarMetrics::start()
@@ -325,7 +334,7 @@ void OmniBarMetrics::sample()
 	}
 }
 
-QString OmniBarMetrics::value(DisplayMetric metric)
+QString OmniBarMetrics::value(DisplayMetric metric, ClockFormat clockFormat)
 {
 	switch (metric) {
 	case DisplayMetric::StreamTime:
@@ -395,13 +404,13 @@ QString OmniBarMetrics::value(DisplayMetric metric)
 		return formatBytes(os_get_proc_resident_size());
 
 	case DisplayMetric::Clock:
-		return QTime::currentTime().toString(QStringLiteral("HH:mm:ss"));
+		return formatClock(clockFormat);
 	}
 
 	return QString::fromUtf8(kNoValue);
 }
 
-QString OmniBarMetrics::previewValue(DisplayMetric metric)
+QString OmniBarMetrics::previewValue(DisplayMetric metric, ClockFormat clockFormat)
 {
 	switch (metric) {
 	case DisplayMetric::StreamTime:
@@ -431,7 +440,7 @@ QString OmniBarMetrics::previewValue(DisplayMetric metric)
 	case DisplayMetric::Memory:
 		return formatBytes(1503238553ULL);
 	case DisplayMetric::Clock:
-		return QTime::currentTime().toString(QStringLiteral("HH:mm:ss"));
+		return formatClock(clockFormat);
 	}
 
 	return QString::fromUtf8(kNoValue);
@@ -498,4 +507,23 @@ DisplayMetric OmniBarMetrics::fromName(const QString &name)
 			return entry.metric;
 	}
 	return DisplayMetric::StreamTime;
+}
+
+QString OmniBarMetrics::clockFormatLabel(ClockFormat format)
+{
+	// The sample is built from the current time rather than written out, so
+	// the entry reads the way this machine's locale will actually render it.
+	const char *key = format == ClockFormat::Hours12 ? "OmniBar.ClockFormat.Hours12"
+							 : "OmniBar.ClockFormat.Hours24";
+	return translated(key).arg(formatClock(format));
+}
+
+QString OmniBarMetrics::clockFormatName(ClockFormat format)
+{
+	return format == ClockFormat::Hours12 ? QStringLiteral("12h") : QStringLiteral("24h");
+}
+
+ClockFormat OmniBarMetrics::clockFormatFromName(const QString &name)
+{
+	return name == QLatin1String("12h") ? ClockFormat::Hours12 : ClockFormat::Hours24;
 }

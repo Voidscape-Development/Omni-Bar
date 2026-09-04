@@ -43,6 +43,10 @@ enum class DisplayMetric {
 	Clock
 };
 
+// How the Time of day readout writes the hour. Stored by name, like the metrics
+// above, so the numbers are free to move.
+enum class ClockFormat { Hours24 = 0, Hours12 = 1 };
+
 // Reads the numbers behind the Display entries. One sampler serves the whole
 // plugin: the readouts are cheap to format but not to collect, and several
 // buttons showing the same metric must agree with one another.
@@ -59,12 +63,13 @@ void stop();
 void sample();
 
 // Current reading, formatted for the bar. Metrics whose output is not running
-// read as a placeholder rather than as a zero.
-QString value(DisplayMetric metric);
+// read as a placeholder rather than as a zero. The clock format is ignored by
+// every metric but Time of day.
+QString value(DisplayMetric metric, ClockFormat clockFormat = ClockFormat::Hours24);
 
 // A representative reading, for the settings dialog's preview: a stream timer
 // should look like a stream timer even when nothing is streaming.
-QString previewValue(DisplayMetric metric);
+QString previewValue(DisplayMetric metric, ClockFormat clockFormat = ClockFormat::Hours24);
 
 // True while the thing this metric describes is running, which is what a
 // Display entry's "this button's action is active" condition tests.
@@ -76,5 +81,11 @@ QString label(DisplayMetric metric);
 // Stable identifier written to the configuration file.
 QString name(DisplayMetric metric);
 DisplayMetric fromName(const QString &name);
+
+// Translated name, stable identifier and a sample reading for a clock format,
+// so the settings dialog can offer the choice without formatting a time itself.
+QString clockFormatLabel(ClockFormat format);
+QString clockFormatName(ClockFormat format);
+ClockFormat clockFormatFromName(const QString &name);
 
 } // namespace OmniBarMetrics

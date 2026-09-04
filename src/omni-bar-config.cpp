@@ -157,6 +157,9 @@ ButtonTreeWidget::ButtonTreeWidget(QWidget *parent) : QTreeWidget(parent)
 	setDropIndicatorShown(true);
 	header()->setStretchLastSection(true);
 	header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+	// Headings sit over their columns rather than against the left edge; the
+	// rows themselves stay left aligned, since they are read as a list.
+	header()->setDefaultAlignment(Qt::AlignCenter);
 }
 
 bool ButtonTreeWidget::isDropAllowed(QTreeWidgetItem *source, QTreeWidgetItem *target,
@@ -747,6 +750,28 @@ QWidget *ButtonEditDialog::createActionTab()
 			&ButtonEditDialog::refreshPreview);
 		displayForm->addRow(obs_module_text("OmniBar.Settings.DisplayMetric"), displayMetricCombo);
 
+		// Only the clock has an hour to write, so the choice is put away
+		// again as soon as the readout is showing anything else.
+		displayClockFormatCombo = new QComboBox();
+		displayClockFormatCombo->addItem(OmniBarMetrics::clockFormatLabel(ClockFormat::Hours24),
+						 OmniBarMetrics::clockFormatName(ClockFormat::Hours24));
+		displayClockFormatCombo->addItem(OmniBarMetrics::clockFormatLabel(ClockFormat::Hours12),
+						 OmniBarMetrics::clockFormatName(ClockFormat::Hours12));
+		connect(displayClockFormatCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+			&ButtonEditDialog::refreshPreview);
+
+		QLabel *clockFormatLabel = new QLabel(obs_module_text("OmniBar.Settings.ClockFormat"));
+		displayForm->addRow(clockFormatLabel, displayClockFormatCombo);
+
+		auto syncClockRow = [this, clockFormatLabel]() {
+			bool isClock = displayMetricCombo->currentData().toString() ==
+				       OmniBarMetrics::name(DisplayMetric::Clock);
+			clockFormatLabel->setVisible(isClock);
+			displayClockFormatCombo->setVisible(isClock);
+		};
+		connect(displayMetricCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, syncClockRow);
+		syncClockRow();
+
 		displayWidthSpin = new QSpinBox();
 		displayWidthSpin->setRange(0, 400);
 		displayWidthSpin->setSuffix(" px");
@@ -1011,6 +1036,10 @@ void ButtonEditDialog::populateFromConfig()
 			int metricIndex = displayMetricCombo->findData(OmniBarMetrics::name(display->getMetric()));
 			if (metricIndex >= 0)
 				displayMetricCombo->setCurrentIndex(metricIndex);
+			int formatIndex = displayClockFormatCombo->findData(
+				OmniBarMetrics::clockFormatName(display->getClockFormat()));
+			if (formatIndex >= 0)
+				displayClockFormatCombo->setCurrentIndex(formatIndex);
 			displayWidthSpin->setValue(display->getMinimumWidth());
 		}
 		return;
@@ -1116,9 +1145,12 @@ void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
 	if (displayEntryMode) {
 		target.isGroup = false;
 		target.children.clear();
-		target.action = std::make_unique<DisplayAction>(
+		auto display = std::make_unique<DisplayAction>(
 			OmniBarMetrics::fromName(displayMetricCombo->currentData().toString()),
 			displayWidthSpin->value());
+		display->setClockFormat(
+			OmniBarMetrics::clockFormatFromName(displayClockFormatCombo->currentData().toString()));
+		target.action = std::move(display);
 		return;
 	}
 
