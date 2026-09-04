@@ -199,6 +199,7 @@ private:
 
 	// Display
 	QComboBox *displayMetricCombo = nullptr;
+	QComboBox *displayClockFormatCombo = nullptr;
 	QSpinBox *displayWidthSpin = nullptr;
 
 	// Divider

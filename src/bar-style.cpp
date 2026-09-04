@@ -20,6 +20,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <obs-module.h>
 #include <QApplication>
 #include <QElapsedTimer>
+#include <QFontMetrics>
 #include <QPalette>
 #include <QtMath>
 
@@ -50,6 +51,55 @@ static QColor withAlpha(const QColor &color, int alpha)
 	QColor result = color;
 	result.setAlpha(alpha);
 	return result;
+}
+
+// front painted over back, source-over. With an opaque back the result is the
+// single colour that front already appears to be once it has been drawn.
+static QColor composite(const QColor &front, const QColor &back)
+{
+	if (!front.isValid())
+		return back;
+	if (!back.isValid() || front.alpha() == 255)
+		return front;
+	if (front.alpha() == 0)
+		return back;
+
+	qreal fa = front.alphaF();
+	qreal ba = back.alphaF();
+	qreal outAlpha = fa + ba * (1.0 - fa);
+	if (outAlpha <= 0.0)
+		return QColor(0, 0, 0, 0);
+
+	auto channel = [&](qreal f, qreal b) {
+		return ((f * fa) + (b * ba * (1.0 - fa))) / outAlpha;
+	};
+
+	QColor result;
+	result.setRgbF(channel(front.redF(), back.redF()), channel(front.greenF(), back.greenF()),
+		       channel(front.blueF(), back.blueF()), outAlpha);
+	return result;
+}
+
+// Qt draws a rounded stylesheet border as four mitred edges plus four corner
+// arcs, and those strokes overlap where they meet. A translucent border colour
+// is therefore blended twice in every corner, which shows as four dark blots
+// that grow with the border width. Resolving the colour against whatever is
+// behind it hands Qt an opaque stroke instead: the edges render exactly as they
+// did, and the corners no longer stack.
+static QColor solidBorder(const QColor &border, const QColor &fill, const QColor &backdrop)
+{
+	// A border the user has turned off stays off - compositing a fully
+	// transparent colour would turn it back on as the backdrop.
+	if (!border.isValid() || border.alpha() == 0)
+		return border;
+	return composite(border, composite(fill, backdrop));
+}
+
+// The opaque colour behind a button on the bar: the bar's own background over
+// the window it is docked in.
+static QColor barBackdrop(const BarStyle &style)
+{
+	return composite(style.effectiveBarBackground(), QApplication::palette().color(QPalette::Window));
 }
 
 qreal omniBarPulseFactor(const BarStyle &style)
@@ -210,14 +260,30 @@ QColor BarStyle::effectiveTextColor() const
 
 int BarStyle::buttonExtent() const
 {
-	return iconSize + (buttonPadding * 2) + (borderWidth * 2);
+	// Every entry on the bar that is not stacking its label over its icon is
+	// this tall, so an icon-only button, one with its label beside the icon
+	// and a readout showing nothing but text all line up with each other. The
+	// text is measured as well as the icon: a small icon with a large UI font
+	// would otherwise leave the labelled entries taller than their neighbours.
+	int content = qMax(iconSize, QFontMetrics(QApplication::font()).height());
+	return content + (buttonPadding * 2) + (borderWidth * 2);
 }
 
 // Shared button rules, reused for the toolbar, the flyout panels and the
 // editor's preview so all three render a button identically.
 static QString buttonRules(const QString &selector, const BarStyle &style, const QColor &background,
-			   const QColor &hover, const QColor &checked, const QColor &border, const QColor &text)
+			   const QColor &hover, const QColor &checked, const QColor &border, const QColor &text,
+			   const QColor &backdrop, const QColor &checkedBorderFill = QColor())
 {
+	// Each state fills the button with a different colour, and the border is
+	// drawn over that fill, so the resolved border has to be worked out once
+	// per state rather than once for the button. A caller whose active fill
+	// moves on its own passes the fill to settle the border against, so the
+	// border does not move with it.
+	QColor restingBorder = solidBorder(border, background, backdrop);
+	QColor hoverBorder = solidBorder(border, hover, backdrop);
+	QColor checkedBorder = solidBorder(border, checkedBorderFill.isValid() ? checkedBorderFill : checked, backdrop);
+
 	return QString("%1 {"
 		       " background-color: %2;"
 		       " border: %3px solid %4;"
@@ -225,18 +291,20 @@ static QString buttonRules(const QString &selector, const BarStyle &style, const
 		       " padding: %6px;"
 		       " color: %7;"
 		       " }"
-		       "%1:hover { background-color: %8; }"
-		       "%1:checked { background-color: %9; }"
-		       "%1:pressed { background-color: %9; }")
+		       "%1:hover { background-color: %8; border-color: %9; }"
+		       "%1:checked { background-color: %10; border-color: %11; }"
+		       "%1:pressed { background-color: %10; border-color: %11; }")
 		.arg(selector)
 		.arg(cssColor(background))
 		.arg(style.borderWidth)
-		.arg(cssColor(border))
+		.arg(cssColor(restingBorder))
 		.arg(style.cornerRadius)
 		.arg(style.buttonPadding)
 		.arg(cssColor(text))
 		.arg(cssColor(hover))
-		.arg(cssColor(checked));
+		.arg(cssColor(hoverBorder))
+		.arg(cssColor(checked))
+		.arg(cssColor(checkedBorder));
 }
 
 QString BarStyle::barStyleSheet() const
@@ -252,7 +320,8 @@ QString BarStyle::barStyleSheet() const
 				.arg(qMax(0, spacing / 2));
 
 	sheet += buttonRules("QToolBar#OmniBar QToolButton", *this, effectiveButtonBackground(), effectiveButtonHover(),
-			     effectiveButtonChecked(), effectiveButtonBorder(), effectiveTextColor());
+			     effectiveButtonChecked(), effectiveButtonBorder(), effectiveTextColor(),
+			     barBackdrop(*this));
 	return sheet;
 }
 
@@ -264,7 +333,7 @@ QString BarStyle::buttonAccentStyleSheet(const QColor &accent) const
 	// The override recolours the states that read as "this button is on":
 	// hover gets a translucent tint of the accent, checked gets it solid.
 	return buttonRules("QToolButton", *this, effectiveButtonBackground(), withAlpha(accent, 90), accent,
-			   effectiveButtonBorder(), effectiveTextColor());
+			   effectiveButtonBorder(), effectiveTextColor(), barBackdrop(*this));
 }
 
 QString BarStyle::displayAccentStyleSheet(const QColor &accent) const
@@ -273,7 +342,7 @@ QString BarStyle::displayAccentStyleSheet(const QColor &accent) const
 		return QString();
 
 	return buttonRules("QToolButton", *this, effectiveButtonBackground(), effectiveButtonHover(),
-			   effectiveButtonChecked(), effectiveButtonBorder(), accent);
+			   effectiveButtonChecked(), effectiveButtonBorder(), accent, barBackdrop(*this));
 }
 
 QString BarStyle::buttonPulseStyleSheet(const QColor &accent, qreal factor) const
@@ -284,8 +353,10 @@ QString BarStyle::buttonPulseStyleSheet(const QColor &accent, qreal factor) cons
 	// put, so the button never reads as flickering or disabled.
 	QColor dimmed = withAlpha(base, qRound(base.alpha() * qBound(0.0, factor, 1.0)));
 
+	// The border is settled against the accent at full strength, so it holds
+	// still while the fill underneath it breathes.
 	return buttonRules("QToolButton", *this, effectiveButtonBackground(), withAlpha(base, 90), dimmed,
-			   effectiveButtonBorder(), effectiveTextColor());
+			   effectiveButtonBorder(), effectiveTextColor(), barBackdrop(*this), base);
 }
 
 QString BarStyle::panelStyleSheet(const QString &objectName) const
@@ -308,11 +379,13 @@ QString BarStyle::panelStyleSheet(const QString &objectName) const
 				" }")
 				.arg(container)
 				.arg(cssColor(panel))
-				.arg(cssColor(effectiveButtonBorder()))
+				.arg(cssColor(solidBorder(effectiveButtonBorder(), panel, panel)))
 				.arg(qMax(2, cornerRadius));
 
+	// A panel is opaque by construction, so it is the whole of what sits
+	// behind the buttons it holds.
 	sheet += buttonRules(container + " QToolButton", *this, effectiveButtonBackground(), effectiveButtonHover(),
-			     effectiveButtonChecked(), effectiveButtonBorder(), effectiveTextColor());
+			     effectiveButtonChecked(), effectiveButtonBorder(), effectiveTextColor(), panel);
 	return sheet;
 }
 

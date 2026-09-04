@@ -148,7 +148,12 @@ std::unique_ptr<ButtonAction> ButtonAction::deserialize(obs_data_t *data)
 	} else if (type == "display") {
 		DisplayMetric metric = OmniBarMetrics::fromName(QString::fromUtf8(obs_data_get_string(data, "metric")));
 		int width = static_cast<int>(obs_data_get_int(data, "min_width"));
-		return std::make_unique<DisplayAction>(metric, width > 0 ? width : 0);
+		auto display = std::make_unique<DisplayAction>(metric, width > 0 ? width : 0);
+		// Readouts written before the clock offered a choice have no entry
+		// here, and keep the 24-hour reading they were showing.
+		display->setClockFormat(OmniBarMetrics::clockFormatFromName(
+			QString::fromUtf8(obs_data_get_string(data, "clock_format"))));
+		return display;
 	} else if (type == "divider") {
 		int thickness = static_cast<int>(obs_data_get_int(data, "thickness"));
 		int length = static_cast<int>(obs_data_get_int(data, "length_percent"));
@@ -778,7 +783,7 @@ bool DisplayAction::isActive() const
 
 QString DisplayAction::currentValue() const
 {
-	return OmniBarMetrics::value(metric);
+	return OmniBarMetrics::value(metric, clockFormat);
 }
 
 QString DisplayAction::getDisplayName() const
@@ -792,6 +797,7 @@ obs_data_t *DisplayAction::serialize() const
 	obs_data_set_string(data, "type", "display");
 	obs_data_set_string(data, "metric", OmniBarMetrics::name(metric).toUtf8().constData());
 	obs_data_set_int(data, "min_width", minimumWidth);
+	obs_data_set_string(data, "clock_format", OmniBarMetrics::clockFormatName(clockFormat).toUtf8().constData());
 	return data;
 }
 

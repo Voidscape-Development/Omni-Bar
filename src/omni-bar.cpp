@@ -227,6 +227,11 @@ QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config, const QC
 	return fallback.isEmpty() ? QIcon() : loadIcon(fallback, tint, size, true);
 }
 
+// Space between a stacked label and the icon it sits over. Shared by the height
+// a stacked button asks for and the placement paintLabelAbove draws at, so the
+// two agree.
+static const int kStackedLabelGap = 4;
+
 // Apply a config's label, display mode, icon and colour override to a tool
 // button.
 static void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_ptr<ButtonConfig> &config,
@@ -277,15 +282,27 @@ static void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_
 
 	button->setToolTip(config->tooltip.isEmpty() ? label : config->tooltip);
 
-	int extent = style.buttonExtent();
+	// One height for every entry that is not stacking its label over its icon,
+	// whether it shows an icon, a label beside one, or nothing but text: they
+	// sit side by side on the bar and have to line up with one another. The
+	// style's extent already allows for the application font; this takes the
+	// widget's own metrics too, in case a theme has given the bar a larger one.
+	int textHeight = button->fontMetrics().height();
+	int extent = qMax(style.buttonExtent(), textHeight + (style.buttonPadding * 2) + (style.borderWidth * 2));
+
 	if (mode == ButtonDisplayMode::IconOnly) {
 		button->setFixedSize(extent, extent);
 	} else {
+		// Pinned rather than floored: a floor still leaves the final height
+		// to Qt's size hint, and the hint for a labelled tool button carries
+		// margins an icon-only one never sees, so the two ended up a few
+		// pixels apart.
 		bool stacked = mode == ButtonDisplayMode::TextBelow || mode == ButtonDisplayMode::TextAbove;
+		int height = stacked ? extent + textHeight + kStackedLabelGap : extent;
 
 		button->setMinimumSize(0, 0);
 		button->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-		button->setMinimumHeight(stacked ? extent + button->fontMetrics().height() : extent);
+		button->setFixedHeight(height);
 		button->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 	}
 
@@ -339,7 +356,7 @@ void OmniBarToolButton::paintLabelAbove()
 	frame.icon = QIcon();
 	painter.drawComplexControl(QStyle::CC_ToolButton, frame);
 
-	const int gap = 4;
+	const int gap = kStackedLabelGap;
 	QFontMetrics metrics(font());
 	QSize icon = iconSize();
 	int textHeight = metrics.height();
@@ -603,7 +620,8 @@ void OmniBarDisplay::updateValue()
 	if (!display)
 		return;
 
-	QString reading = previewMode ? OmniBarMetrics::previewValue(display->getMetric()) : display->currentValue();
+	QString reading = previewMode ? OmniBarMetrics::previewValue(display->getMetric(), display->getClockFormat())
+				      : display->currentValue();
 
 	// The configured label reads as a prefix - "Live 01:23:45" - so a row of
 	// readouts can say what each number is without a tooltip. Nothing below

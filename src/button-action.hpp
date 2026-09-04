@@ -293,6 +293,11 @@ public:
 	DisplayMetric getMetric() const { return metric; }
 	void setMetric(DisplayMetric value) { metric = value; }
 
+	// Only the Time of day metric reads this; it is kept on every readout so
+	// switching a readout to the clock and back does not lose the choice.
+	ClockFormat getClockFormat() const { return clockFormat; }
+	void setClockFormat(ClockFormat value) { clockFormat = value; }
+
 	// Floor for the entry's width, in pixels. Digits are not all the same
 	// width in every font, so a timer that is free to shrink shuffles its
 	// neighbours about as it counts. Zero fits the content.
@@ -305,6 +310,7 @@ public:
 private:
 	DisplayMetric metric;
 	int minimumWidth;
+	ClockFormat clockFormat = ClockFormat::Hours24;
 };
 
 // Button configuration class
