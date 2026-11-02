@@ -36,6 +36,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "settings-manager.hpp"
 
 class ButtonConfig;
+struct ActivationCondition;
 class QMainWindow;
 class QBoxLayout;
 
@@ -271,6 +272,15 @@ public:
 	// choice - the one route used by the hotkeys, the right-click menu and
 	// anything else that is not the settings dialog.
 	static void moveTo(DockPosition position);
+
+	// Edits made from the bar's own right-click menu, straight to the saved
+	// entries: each saves, rebuilds the bar and refreshes an open settings
+	// window that has nothing of its own to lose. They return false when the
+	// entry cannot be found or the change would do nothing.
+	static bool setEntryShowCondition(const QString &id, const ActivationCondition &condition);
+	static bool moveEntry(const QString &id, int step);
+	static bool removeEntry(const QString &id);
+	static void setLocked(bool locked);
 
 public slots:
 	void refreshFromConfiguration();

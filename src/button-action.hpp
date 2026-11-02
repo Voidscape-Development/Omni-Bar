@@ -31,7 +31,22 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 // Forward declaration
 class ButtonConfig;
 
-enum class ActionType { None, Frontend, SourceHotkey, SourceFilter, SourceVisibility, Spacer, Divider, Display };
+// Stored by name in the configuration file, so the numbers are free to move.
+enum class ActionType {
+	None,
+	Frontend,
+	SourceHotkey,
+	SourceFilter,
+	SourceVisibility,
+	Spacer,
+	Divider,
+	Display,
+	Scene,
+	AudioMute
+};
+
+// What a mute button does each time it is pressed. Stored as numbers.
+enum class MuteMode { Toggle = 0, Mute = 1, Unmute = 2 };
 
 enum class FrontendActionType {
 	StartStreaming,
@@ -54,6 +69,24 @@ enum class FrontendActionType {
 	DisableStudioMode,
 	ToggleStudioMode,
 	TransitionToProgram
+};
+
+// Everything about one frontend action that is not behaviour: the name it is
+// stored under, the name shown, its default icon, what it reports on, and the
+// family it belongs to. Actions that start, stop or toggle the same thing share
+// a family, which the action picker shows as one entry with a choice of
+// variant. One table holds all of them, so adding an action is one line there
+// plus its behaviour.
+struct FrontendActionInfo {
+	FrontendActionType type;
+	// Written to the configuration file, so it must never change.
+	const char *id;
+	const char *labelKey;
+	const char *icon;
+	const char *family;
+	// Short name of the variant within the family: Toggle, Start, Stop...
+	const char *variantKey;
+	BarState state;
 };
 
 // Where a button's label sits relative to its icon. The numbers are written to
@@ -168,6 +201,11 @@ public:
 	// Translated name shown to the user.
 	static QString getFrontendActionLabel(FrontendActionType type);
 
+	static const FrontendActionInfo &info(FrontendActionType type);
+	static const QList<FrontendActionInfo> &all();
+	// The members of a family, in the order the picker offers them.
+	static QList<FrontendActionType> familyMembers(const QString &family);
+
 private:
 	FrontendActionType actionType;
 };
@@ -224,6 +262,9 @@ private:
 	QString filterName;
 };
 
+// Shows or hides a source in a scene. An empty scene name means whichever scene
+// is on air at the moment of pressing, so one button can serve a webcam that
+// appears in several scenes.
 class SourceVisibilityAction : public ButtonAction {
 public:
 	SourceVisibilityAction(const QString &scene, const QString &source);
@@ -240,9 +281,64 @@ public:
 	void setSceneName(const QString &name) { sceneName = name; }
 	void setSourceName(const QString &name) { sourceName = name; }
 
+	bool followsCurrentScene() const { return sceneName.isEmpty(); }
+
+	// True when the source no longer exists at all. For a button that
+	// follows the current scene, the source being absent from the scene on
+	// air is expected rather than a fault.
+	bool sourceMissing() const;
+
 private:
+	// The scene the action works on, with a reference the caller releases.
+	obs_source_t *targetScene() const;
+
 	QString sceneName;
 	QString sourceName;
+};
+
+// Switches the scene on air, as clicking it in the Scenes dock does: in studio
+// mode it goes to the preview, ready to transition.
+class SceneAction : public ButtonAction {
+public:
+	explicit SceneAction(const QString &scene);
+
+	ActionType getType() const override { return ActionType::Scene; }
+	void execute() override;
+	// Lit while the scene is the one on air.
+	bool isActive() const override;
+	bool isValid() const override;
+	QString getDisplayName() const override;
+	obs_data_t *serialize() const override;
+
+	QString getSceneName() const { return sceneName; }
+	void setSceneName(const QString &name) { sceneName = name; }
+
+private:
+	QString sceneName;
+};
+
+// Mutes or unmutes an audio source - a microphone, desktop audio, a media
+// source with sound.
+class AudioMuteAction : public ButtonAction {
+public:
+	AudioMuteAction(const QString &source, MuteMode mode = MuteMode::Toggle);
+
+	ActionType getType() const override { return ActionType::AudioMute; }
+	void execute() override;
+	// Lit while the source is muted, the way the OBS mixer marks it.
+	bool isActive() const override;
+	bool isValid() const override;
+	QString getDisplayName() const override;
+	obs_data_t *serialize() const override;
+
+	QString getSourceName() const { return sourceName; }
+	void setSourceName(const QString &name) { sourceName = name; }
+	MuteMode getMode() const { return mode; }
+	void setMode(MuteMode value) { mode = value; }
+
+private:
+	QString sourceName;
+	MuteMode mode;
 };
 
 class SpacerAction : public ButtonAction {

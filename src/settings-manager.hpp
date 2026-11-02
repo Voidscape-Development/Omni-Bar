@@ -47,6 +47,11 @@ public:
 	// return to - even for a bar that has been hidden since it was installed.
 	static DockPosition getLastVisiblePosition();
 
+	// A locked bar offers no editing from its own right-click menu, so a
+	// stray click during a show cannot move or remove anything.
+	static bool isLocked();
+	static void setLocked(bool locked);
+
 	// Bar and button styling
 	static const BarStyle &getStyle();
 	static void setStyle(const BarStyle &style);
@@ -64,6 +69,7 @@ private:
 
 	static DockPosition dockPosition;
 	static DockPosition lastVisiblePosition;
+	static bool locked;
 	static BarStyle style;
 	static QList<std::shared_ptr<ButtonConfig>> buttons;
 	static bool loaded;

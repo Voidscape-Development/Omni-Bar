@@ -28,6 +28,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 // is loaded, and preset colours are read from the Qt palette.
 DockPosition SettingsManager::dockPosition = DockPosition::Top;
 DockPosition SettingsManager::lastVisiblePosition = DockPosition::Top;
+bool SettingsManager::locked = false;
 BarStyle SettingsManager::style;
 QList<std::shared_ptr<ButtonConfig>> SettingsManager::buttons;
 bool SettingsManager::loaded = false;
@@ -74,6 +75,8 @@ void SettingsManager::load()
 		lastVisiblePosition = static_cast<DockPosition>(storedVisible);
 	else if (dockPosition != DockPosition::None)
 		lastVisiblePosition = dockPosition;
+
+	locked = obs_data_get_bool(data, "locked");
 
 	OmniBarHotkeys::loadBindings(data);
 
@@ -134,6 +137,8 @@ void SettingsManager::save()
 	obs_data_set_int(data, "dock_position", static_cast<int>(dockPosition));
 	obs_data_set_int(data, "last_visible_position", static_cast<int>(lastVisiblePosition));
 
+	obs_data_set_bool(data, "locked", locked);
+
 	OmniBarHotkeys::saveBindings(data);
 
 	obs_data_t *styleData = style.serialize();
@@ -168,6 +173,16 @@ void SettingsManager::setDockPosition(DockPosition position)
 		lastVisiblePosition = position;
 
 	dockPosition = position;
+}
+
+bool SettingsManager::isLocked()
+{
+	return locked;
+}
+
+void SettingsManager::setLocked(bool value)
+{
+	locked = value;
 }
 
 DockPosition SettingsManager::getLastVisiblePosition()

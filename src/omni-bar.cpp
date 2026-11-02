@@ -40,6 +40,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QStyleOptionToolButton>
 #include <QMessageBox>
 #include <QEvent>
+#include <functional>
 
 OmniBar *OmniBar::instance = nullptr;
 
@@ -160,49 +161,7 @@ static QString defaultIconName(const std::shared_ptr<ButtonConfig> &config)
 
 		// Start, stop and toggle each get their own glyph, so two buttons
 		// from the same family never look identical.
-		switch (frontendAction->getActionType()) {
-		case FrontendActionType::ToggleStreaming:
-			return "stream.svg";
-		case FrontendActionType::StartStreaming:
-			return "stream-start.svg";
-		case FrontendActionType::StopStreaming:
-			return "stream-stop.svg";
-		case FrontendActionType::ToggleRecording:
-			return "record.svg";
-		case FrontendActionType::StartRecording:
-			return "record-start.svg";
-		case FrontendActionType::StopRecording:
-			return "record-stop.svg";
-		case FrontendActionType::TogglePauseRecording:
-			return "pause-toggle.svg";
-		case FrontendActionType::PauseRecording:
-			return "pause.svg";
-		case FrontendActionType::UnpauseRecording:
-			return "play.svg";
-		case FrontendActionType::ToggleReplayBuffer:
-			return "replay.svg";
-		case FrontendActionType::StartReplayBuffer:
-			return "replay-start.svg";
-		case FrontendActionType::StopReplayBuffer:
-			return "replay-stop.svg";
-		case FrontendActionType::SaveReplayBuffer:
-			return "save-replay.svg";
-		case FrontendActionType::ToggleVirtualCam:
-			return "virtual-cam.svg";
-		case FrontendActionType::StartVirtualCam:
-			return "virtual-cam-start.svg";
-		case FrontendActionType::StopVirtualCam:
-			return "virtual-cam-stop.svg";
-		case FrontendActionType::ToggleStudioMode:
-			return "studio-mode.svg";
-		case FrontendActionType::EnableStudioMode:
-			return "studio-mode-on.svg";
-		case FrontendActionType::DisableStudioMode:
-			return "studio-mode-off.svg";
-		case FrontendActionType::TransitionToProgram:
-			return "transition.svg";
-		}
-		return QString();
+		return QString::fromUtf8(FrontendAction::info(frontendAction->getActionType()).icon);
 	}
 	case ActionType::SourceFilter:
 		return "filter.svg";
@@ -210,6 +169,12 @@ static QString defaultIconName(const std::shared_ptr<ButtonConfig> &config)
 		return "visibility.svg";
 	case ActionType::SourceHotkey:
 		return "hotkey.svg";
+	case ActionType::Scene:
+		return "scene.svg";
+	case ActionType::AudioMute: {
+		auto *mute = dynamic_cast<AudioMuteAction *>(config->action.get());
+		return mute && mute->getMode() == MuteMode::Mute ? "audio-mute.svg" : "audio.svg";
+	}
 	case ActionType::Spacer:
 		return "spacer.svg";
 	case ActionType::Divider:
@@ -1621,37 +1586,208 @@ std::shared_ptr<ButtonConfig> OmniBar::entryAt(const QPoint &pos) const
 	return nullptr;
 }
 
+// The list an entry sits in - the bar itself, or its group - and where in it.
+static bool locateEntry(QList<std::shared_ptr<ButtonConfig>> &entries, const QString &id,
+			QList<std::shared_ptr<ButtonConfig>> **list, int *index)
+{
+	for (int i = 0; i < entries.size(); i++) {
+		if (!entries[i])
+			continue;
+		if (entries[i]->id == id) {
+			*list = &entries;
+			*index = i;
+			return true;
+		}
+		auto &children = entries[i]->children;
+		for (int c = 0; c < children.size(); c++) {
+			if (children[c] && children[c]->id == id) {
+				*list = &children;
+				*index = c;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// Saves an edit made from the bar's menu and brings everything that shows the
+// entries up to date. The rebuild waits for the menu to unwind, since the
+// menu was opened from one of the widgets it replaces.
+static void commitEntries(const QList<std::shared_ptr<ButtonConfig>> &entries)
+{
+	SettingsManager::setButtons(entries);
+	SettingsManager::save();
+	QTimer::singleShot(0, []() {
+		if (OmniBar *bar = OmniBar::getInstance())
+			bar->rebuildToolbar();
+		OmniBarConfig::reloadIfClean();
+	});
+}
+
+bool OmniBar::setEntryShowCondition(const QString &id, const ActivationCondition &condition)
+{
+	auto entries = SettingsManager::getButtons();
+	QList<std::shared_ptr<ButtonConfig>> *list = nullptr;
+	int index = -1;
+	if (!locateEntry(entries, id, &list, &index))
+		return false;
+
+	auto &entry = (*list)[index];
+	if (entry->showCondition.source == condition.source && entry->showCondition.inverted == condition.inverted)
+		return false;
+	entry->showCondition = condition;
+	commitEntries(entries);
+	return true;
+}
+
+bool OmniBar::moveEntry(const QString &id, int step)
+{
+	auto entries = SettingsManager::getButtons();
+	QList<std::shared_ptr<ButtonConfig>> *list = nullptr;
+	int index = -1;
+	if (!locateEntry(entries, id, &list, &index))
+		return false;
+
+	int target = index + step;
+	if (target < 0 || target >= list->size())
+		return false;
+	list->move(index, target);
+	commitEntries(entries);
+	return true;
+}
+
+bool OmniBar::removeEntry(const QString &id)
+{
+	auto entries = SettingsManager::getButtons();
+	QList<std::shared_ptr<ButtonConfig>> *list = nullptr;
+	int index = -1;
+	if (!locateEntry(entries, id, &list, &index))
+		return false;
+
+	list->removeAt(index);
+	commitEntries(entries);
+	return true;
+}
+
+void OmniBar::setLocked(bool locked)
+{
+	SettingsManager::setLocked(locked);
+	SettingsManager::save();
+}
+
 void OmniBar::onContextMenuRequested(const QPoint &pos)
 {
 	// Built fresh each time, so it can speak about whatever was clicked.
 	QMenu menu(this);
+	menu.setToolTipsVisible(true);
 
-	if (auto entry = entryAt(pos)) {
-		QString editText =
-			QString::fromUtf8(obs_module_text("OmniBar.Menu.EditEntry")).arg(entry->displayText());
+	// Every change is queued: the bar is rebuilt or moved by most of them,
+	// and must not be while its own menu is still unwinding.
+	auto later = [](std::function<void()> work) {
+		return [work]() {
+			QTimer::singleShot(0, work);
+		};
+	};
+
+	bool locked = SettingsManager::isLocked();
+	// Edits from here write the saved entries, which would quietly undo - or
+	// be undone by - edits waiting in an open settings window.
+	bool settingsBusy = OmniBarConfig::hasUnappliedChanges();
+	QString busyTip = QString::fromUtf8(obs_module_text("OmniBar.Menu.SettingsBusy"));
+
+	auto entry = locked ? nullptr : entryAt(pos);
+	if (entry) {
 		QString id = entry->id;
-		// Queued, so the editor does not open inside the menu's own loop.
-		connect(menu.addAction(editText), &QAction::triggered, this,
-			[id]() { QTimer::singleShot(0, [id]() { OmniBarConfig::showDialog(id); }); });
+		connect(menu.addAction(
+				QString::fromUtf8(obs_module_text("OmniBar.Menu.EditEntry")).arg(entry->displayText())),
+			&QAction::triggered, this, later([id]() { OmniBarConfig::showDialog(id); }));
+
+		// When it is shown, as a list of the states it can follow.
+		QMenu *show = menu.addMenu(QString::fromUtf8(obs_module_text("OmniBar.Menu.ShowWhile")));
+		show->setEnabled(!settingsBusy);
+		show->setToolTip(settingsBusy ? busyTip : QString());
+		std::vector<std::pair<ConditionSource, const char *>> sources = {
+			{ConditionSource::Always, "OmniBar.Condition.Mode.Always"},
+			{ConditionSource::Streaming, "OmniBar.Condition.Streaming"},
+			{ConditionSource::Recording, "OmniBar.Condition.Recording"},
+			{ConditionSource::RecordingPaused, "OmniBar.Condition.RecordingPaused"},
+			{ConditionSource::ReplayBuffer, "OmniBar.Condition.ReplayBuffer"},
+			{ConditionSource::VirtualCam, "OmniBar.Condition.VirtualCam"},
+			{ConditionSource::StudioMode, "OmniBar.Condition.StudioMode"}};
+		if (entry->hasAction() || entry->isDisplay())
+			sources.insert(sources.begin() + 1,
+				       {ConditionSource::OwnAction, "OmniBar.Condition.OwnAction"});
+		for (const auto &source : sources) {
+			QAction *action = show->addAction(QString::fromUtf8(obs_module_text(source.second)));
+			action->setCheckable(true);
+			action->setChecked(entry->showCondition.source == source.first &&
+					   !entry->showCondition.inverted);
+			ActivationCondition condition;
+			condition.source = source.first;
+			connect(action, &QAction::triggered, this,
+				later([id, condition]() { OmniBar::setEntryShowCondition(id, condition); }));
+		}
+
+		// Along the bar, or within its group.
+		auto entries = SettingsManager::getButtons();
+		QList<std::shared_ptr<ButtonConfig>> *list = nullptr;
+		int index = -1;
+		locateEntry(entries, id, &list, &index);
+		bool vertical = orientation() == Qt::Vertical;
+		QAction *back = menu.addAction(
+			QString::fromUtf8(obs_module_text(vertical ? "OmniBar.Menu.MoveUp" : "OmniBar.Menu.MoveLeft")));
+		QAction *forward = menu.addAction(QString::fromUtf8(
+			obs_module_text(vertical ? "OmniBar.Menu.MoveDown" : "OmniBar.Menu.MoveRight")));
+		back->setEnabled(!settingsBusy && list && index > 0);
+		forward->setEnabled(!settingsBusy && list && index >= 0 && index < list->size() - 1);
+		connect(back, &QAction::triggered, this, later([id]() { OmniBar::moveEntry(id, -1); }));
+		connect(forward, &QAction::triggered, this, later([id]() { OmniBar::moveEntry(id, 1); }));
+
+		QAction *remove = menu.addAction(QString::fromUtf8(obs_module_text("OmniBar.Menu.Remove")));
+		remove->setEnabled(!settingsBusy);
+		remove->setToolTip(settingsBusy ? busyTip : QString());
+		bool hasChildren = entry->isGroup && !entry->children.isEmpty();
+		QPointer<OmniBar> self(this);
+		connect(remove, &QAction::triggered, this, later([id, hasChildren, self]() {
+				// A group takes its buttons with it, so that is asked first.
+				if (hasChildren &&
+				    QMessageBox::question(self ? self->window() : nullptr,
+							  QString::fromUtf8(obs_module_text("OmniBar.Menu.Remove")),
+							  QString::fromUtf8(obs_module_text(
+								  "OmniBar.Settings.ConfirmRemoveGroup"))) !=
+					    QMessageBox::Yes)
+					return;
+				OmniBar::removeEntry(id);
+			}));
+
 		menu.addSeparator();
 	}
 
-	QMenu *dock = menu.addMenu(QString::fromUtf8(obs_module_text("OmniBar.Menu.Dock")));
-	const std::pair<DockPosition, const char *> positions[] = {{DockPosition::Top, "OmniBar.Position.Top"},
-								   {DockPosition::Left, "OmniBar.Position.Left"},
-								   {DockPosition::Bottom, "OmniBar.Position.Bottom"},
-								   {DockPosition::Right, "OmniBar.Position.Right"},
-								   {DockPosition::None, "OmniBar.Position.None"}};
-	for (const auto &position : positions) {
-		QAction *action = dock->addAction(QString::fromUtf8(obs_module_text(position.second)));
-		action->setCheckable(true);
-		action->setChecked(SettingsManager::getDockPosition() == position.first);
-		DockPosition target = position.first;
-		// Queued, so the bar is not taken off the window while its own
-		// menu is still unwinding.
-		connect(action, &QAction::triggered, this,
-			[target]() { QTimer::singleShot(0, [target]() { OmniBar::moveTo(target); }); });
+	if (!locked) {
+		connect(menu.addAction(QString::fromUtf8(obs_module_text("OmniBar.Menu.Add"))), &QAction::triggered,
+			this, later([]() { OmniBarConfig::showAddMenu(); }));
+
+		QMenu *dock = menu.addMenu(QString::fromUtf8(obs_module_text("OmniBar.Menu.Dock")));
+		const std::pair<DockPosition, const char *> positions[] = {
+			{DockPosition::Top, "OmniBar.Position.Top"},
+			{DockPosition::Left, "OmniBar.Position.Left"},
+			{DockPosition::Bottom, "OmniBar.Position.Bottom"},
+			{DockPosition::Right, "OmniBar.Position.Right"},
+			{DockPosition::None, "OmniBar.Position.None"}};
+		for (const auto &position : positions) {
+			QAction *action = dock->addAction(QString::fromUtf8(obs_module_text(position.second)));
+			action->setCheckable(true);
+			action->setChecked(SettingsManager::getDockPosition() == position.first);
+			DockPosition target = position.first;
+			connect(action, &QAction::triggered, this, later([target]() { OmniBar::moveTo(target); }));
+		}
 	}
+
+	QAction *lock = menu.addAction(QString::fromUtf8(obs_module_text("OmniBar.Menu.Lock")));
+	lock->setCheckable(true);
+	lock->setChecked(locked);
+	lock->setToolTip(QString::fromUtf8(obs_module_text("OmniBar.Menu.LockHint")));
+	connect(lock, &QAction::toggled, this, [](bool value) { OmniBar::setLocked(value); });
 
 	menu.addSeparator();
 	connect(menu.addAction(QString::fromUtf8(obs_module_text("OmniBar.Settings.Configure"))), &QAction::triggered,

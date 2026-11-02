@@ -17,10 +17,16 @@ Each button runs one of:
 | Action | What it does |
 | --- | --- |
 | **Frontend action** | Any of 20 OBS operations: start / stop / toggle for streaming, recording, replay buffer, virtual camera and studio mode, plus pause, unpause and toggle pause for recording, save replay buffer, and transition to program |
-| **Source hotkey** | Fires a hotkey registered by a specific source, picked by its readable description |
+| **Switch to scene** | Puts a scene on air, as clicking it in the Scenes dock does, and lights up while it is there |
+| **Mute or unmute** | Toggles, mutes or unmutes an audio source, and lights up while it is muted |
+| **Source visibility** | Toggles a source's visibility within a scene, or within whichever scene is on air |
 | **Source filter** | Toggles a filter on a source |
-| **Source visibility** | Toggles a source's visibility within a scene |
+| **Source hotkey** | Fires a hotkey registered by a specific source, picked by its readable description |
 | **No action** | Nothing on its own — for a group that only opens and closes |
+
+The action is chosen from a searchable list grouped by what it belongs to. Start, stop and toggle of the
+same thing are one entry, with the variant picked underneath, so typing "stop stream" finds Stream with
+Stop one click away.
 
 Buttons that describe a state — toggle streaming, a filter, a scene item's visibility — show that
 state, so the bar doubles as a status readout.
@@ -154,8 +160,9 @@ Requires OBS Studio 31.1.1 or newer.
 ## Usage
 
 Open **Tools → Omni Bar Settings**, or right-click the bar itself and choose **Configure Omni Bar…**
-Right-clicking a button or readout also offers to edit that entry directly, and to move the bar to
-another edge.
+Right-clicking a button or readout offers to edit it, choose when it is shown, move it along the bar,
+or remove it, as well as to add an entry or move the bar to another edge. **Lock bar** takes the editing
+out of that menu, so a stray click during a show changes nothing; the settings window still works.
 
 The settings window shows the bar you are building across the top, drawn with the bar's own widgets.
 **Preview as** shows it as it would look idle, live, recording or paused, with the replay buffer,

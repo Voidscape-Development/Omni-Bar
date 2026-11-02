@@ -46,11 +46,21 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QShortcut>
 #include <QKeySequence>
 #include <QScrollArea>
+#include <QTimer>
+#include <QFontMetrics>
+#include <QKeyEvent>
+#include <QScreen>
+#include <QHeaderView>
 #include <QSplitter>
 #include <QButtonGroup>
 #include <QTreeWidgetItemIterator>
 
 static const int kConfigIdRole = Qt::UserRole;
+
+// Rows of mutually exclusive buttons mark the chosen one in the highlight
+// colour, since a checked push button is easy to miss in some themes.
+static const char *const kSegmentSheet =
+	"QPushButton:checked { background-color: palette(highlight); color: palette(highlighted-text); }";
 static const int kConfigIsGroupRole = Qt::UserRole + 1;
 // Spacers, dividers and readouts are part of the bar itself, so they never go
 // inside a group - a group would only drop them on the floor when it built its
@@ -262,6 +272,305 @@ void ButtonTreeWidget::dropEvent(QDropEvent *event)
 }
 
 // ============================================================================
+// ActionPicker
+// ============================================================================
+
+// One entry in the picker. A frontend family stands for its start, stop and
+// toggle variants together; the rest are a kind of action that needs a target.
+struct ActionChoice {
+	const char *id;
+	const char *labelKey;
+	const char *categoryKey;
+	const char *icon;
+	// Shown beside the entry, for the kinds whose variants do not say it.
+	const char *hintKey;
+};
+
+static const ActionChoice kActionChoices[] = {
+	{"frontend:stream", "OmniBar.Choice.Stream", "OmniBar.IconGroup.Streaming", "stream.svg", nullptr},
+	{"frontend:record", "OmniBar.Choice.Record", "OmniBar.IconGroup.Recording", "record.svg", nullptr},
+	{"frontend:pause", "OmniBar.Choice.Pause", "OmniBar.IconGroup.Recording", "pause-toggle.svg", nullptr},
+	{"frontend:replay", "OmniBar.Choice.Replay", "OmniBar.IconGroup.Replay", "replay.svg", nullptr},
+	{"frontend:save_replay", "OmniBar.Choice.SaveReplay", "OmniBar.IconGroup.Replay", "save-replay.svg", nullptr},
+	{"frontend:virtual_cam", "OmniBar.Choice.VirtualCam", "OmniBar.IconGroup.Camera", "virtual-cam.svg", nullptr},
+	{"frontend:studio", "OmniBar.Choice.Studio", "OmniBar.IconGroup.Studio", "studio-mode.svg", nullptr},
+	{"frontend:transition", "OmniBar.Choice.Transition", "OmniBar.IconGroup.Studio", "transition.svg", nullptr},
+	{"scene", "OmniBar.Choice.Scene", "OmniBar.IconGroup.Scenes", "scene.svg", "OmniBar.Choice.SceneHint"},
+	{"mute", "OmniBar.Choice.Mute", "OmniBar.IconGroup.Audio", "audio.svg", "OmniBar.Choice.MuteHint"},
+	{"visibility", "OmniBar.Choice.Visibility", "OmniBar.IconGroup.Sources", "visibility.svg",
+	 "OmniBar.Choice.VisibilityHint"},
+	{"filter", "OmniBar.Choice.Filter", "OmniBar.IconGroup.Sources", "filter.svg", nullptr},
+	{"hotkey", "OmniBar.Choice.Hotkey", "OmniBar.IconGroup.Sources", "hotkey.svg", "OmniBar.Choice.HotkeyHint"},
+	{"none", "OmniBar.Choice.None", "OmniBar.IconGroup.Other", "group.svg", "OmniBar.Choice.NoneHint"},
+};
+
+static const ActionChoice *findChoice(const QString &id)
+{
+	for (const auto &choice : kActionChoices) {
+		if (id == QLatin1String(choice.id))
+			return &choice;
+	}
+	return nullptr;
+}
+
+// The frontend family a choice stands for, or an empty string.
+static QString choiceFamily(const QString &choice)
+{
+	static const QString prefix = QStringLiteral("frontend:");
+	return choice.startsWith(prefix) ? choice.mid(prefix.size()) : QString();
+}
+
+// The picker entry an action belongs to.
+static QString choiceForAction(const ButtonAction *action)
+{
+	if (!action)
+		return QStringLiteral("none");
+
+	switch (action->getType()) {
+	case ActionType::Frontend: {
+		auto *frontend = dynamic_cast<const FrontendAction *>(action);
+		return frontend ? QStringLiteral("frontend:") +
+					  QString::fromUtf8(FrontendAction::info(frontend->getActionType()).family)
+				: QStringLiteral("none");
+	}
+	case ActionType::SourceHotkey:
+		return QStringLiteral("hotkey");
+	case ActionType::SourceFilter:
+		return QStringLiteral("filter");
+	case ActionType::SourceVisibility:
+		return QStringLiteral("visibility");
+	case ActionType::Scene:
+		return QStringLiteral("scene");
+	case ActionType::AudioMute:
+		return QStringLiteral("mute");
+	default:
+		return QStringLiteral("none");
+	}
+}
+
+// What appears beside an entry: its variants for a family with several, its
+// own hint otherwise.
+static QString choiceHint(const ActionChoice &choice)
+{
+	QString family = choiceFamily(QString::fromUtf8(choice.id));
+	if (!family.isEmpty()) {
+		QStringList variants;
+		const auto members = FrontendAction::familyMembers(family);
+		if (members.size() > 1) {
+			for (FrontendActionType type : members)
+				variants << QString::fromUtf8(obs_module_text(FrontendAction::info(type).variantKey));
+		}
+		return variants.join(QStringLiteral(" · "));
+	}
+	return choice.hintKey ? QString::fromUtf8(obs_module_text(choice.hintKey)) : QString();
+}
+
+// Everything a search can match an entry on: its name, its group, its hint,
+// and for a family the full name of every action in it, so "stop stream"
+// finds Stream.
+static QString choiceSearchText(const ActionChoice &choice)
+{
+	QStringList words;
+	words << QString::fromUtf8(obs_module_text(choice.labelKey));
+	words << QString::fromUtf8(obs_module_text(choice.categoryKey));
+	words << choiceHint(choice);
+	QString family = choiceFamily(QString::fromUtf8(choice.id));
+	if (!family.isEmpty()) {
+		for (FrontendActionType type : FrontendAction::familyMembers(family))
+			words << FrontendAction::getFrontendActionLabel(type);
+	}
+	return words.join(QLatin1Char(' ')).toLower();
+}
+
+static const int kChoiceRole = Qt::UserRole;
+static const int kSearchRole = Qt::UserRole + 1;
+
+QString ActionPicker::choiceLabel(const QString &choice)
+{
+	const ActionChoice *found = findChoice(choice);
+	return found ? QString::fromUtf8(obs_module_text(found->labelKey)) : QString();
+}
+
+QString ActionPicker::choiceIcon(const QString &choice)
+{
+	const ActionChoice *found = findChoice(choice);
+	return found ? QString::fromUtf8(found->icon) : QString();
+}
+
+ActionPicker::ActionPicker(QWidget *parent) : QWidget(parent, Qt::Popup)
+{
+	QVBoxLayout *layout = new QVBoxLayout(this);
+	layout->setContentsMargins(6, 6, 6, 6);
+	layout->setSpacing(4);
+
+	search = new QLineEdit();
+	search->setPlaceholderText(obs_module_text("OmniBar.Picker.Search"));
+	search->setClearButtonEnabled(true);
+	search->installEventFilter(this);
+	connect(search, &QLineEdit::textChanged, this, &ActionPicker::applyFilter);
+	layout->addWidget(search);
+
+	list = new QTreeWidget();
+	list->setColumnCount(2);
+	list->setHeaderHidden(true);
+	list->setRootIsDecorated(false);
+	list->setIndentation(10);
+	// Headings are shorter than entries, so rows are not all one height.
+	list->setUniformRowHeights(false);
+	list->setFocusPolicy(Qt::NoFocus);
+	list->header()->setStretchLastSection(false);
+	list->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+	list->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+	connect(list, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem *item) { choose(item); });
+	layout->addWidget(list, 1);
+
+	QColor ink = palette().color(QPalette::Text);
+	QColor quiet = ink;
+	quiet.setAlphaF(0.6);
+	QHash<QString, QTreeWidgetItem *> categories;
+
+	for (const auto &choice : kActionChoices) {
+		QString categoryKey = QString::fromUtf8(choice.categoryKey);
+		QTreeWidgetItem *category = categories.value(categoryKey);
+		if (!category) {
+			category = new QTreeWidgetItem(list);
+			category->setText(0, QString::fromUtf8(obs_module_text(choice.categoryKey)).toUpper());
+			category->setFlags(Qt::ItemIsEnabled);
+			QFont font = category->font(0);
+			font.setBold(true);
+			font.setPointSizeF(font.pointSizeF() * 0.85);
+			category->setFont(0, font);
+			category->setForeground(0, quiet);
+			category->setFirstColumnSpanned(true);
+			// A little air above each heading, so groups read as groups.
+			category->setSizeHint(0, QSize(0, QFontMetrics(font).height() + 10));
+			categories.insert(categoryKey, category);
+		}
+
+		QTreeWidgetItem *item = new QTreeWidgetItem(category);
+		item->setText(0, QString::fromUtf8(obs_module_text(choice.labelKey)));
+		item->setText(1, choiceHint(choice));
+		item->setForeground(1, quiet);
+		item->setIcon(0, omniBarBundledIcon(QString::fromUtf8(choice.icon), ink, 16));
+		item->setData(0, kChoiceRole, QString::fromUtf8(choice.id));
+		item->setData(0, kSearchRole, choiceSearchText(choice));
+		item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+	}
+	list->expandAll();
+
+	resize(380, 480);
+}
+
+void ActionPicker::popup(QWidget *anchor, const QString &currentChoice)
+{
+	search->clear();
+	applyFilter(QString());
+
+	for (QTreeWidgetItemIterator it(list); *it; ++it) {
+		if ((*it)->data(0, kChoiceRole).toString() == currentChoice) {
+			list->setCurrentItem(*it);
+			list->scrollToItem(*it);
+			break;
+		}
+	}
+
+	resize(qMax(380, anchor->width()), height());
+	QPoint position = anchor->mapToGlobal(QPoint(0, anchor->height() + 2));
+	if (QScreen *screen = anchor->screen()) {
+		QRect available = screen->availableGeometry();
+		if (position.y() + height() > available.bottom())
+			position.setY(anchor->mapToGlobal(QPoint(0, 0)).y() - height() - 2);
+		position.setX(qBound(available.left(), position.x(), available.right() - width()));
+	}
+	move(position);
+	show();
+	search->setFocus(Qt::PopupFocusReason);
+}
+
+void ActionPicker::applyFilter(const QString &text)
+{
+	const QStringList words = text.toLower().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+	QTreeWidgetItem *firstVisible = nullptr;
+
+	for (int c = 0; c < list->topLevelItemCount(); c++) {
+		QTreeWidgetItem *category = list->topLevelItem(c);
+		bool anyShown = false;
+		for (int i = 0; i < category->childCount(); i++) {
+			QTreeWidgetItem *item = category->child(i);
+			QString haystack = item->data(0, kSearchRole).toString();
+			bool match = true;
+			for (const QString &word : words) {
+				if (!haystack.contains(word)) {
+					match = false;
+					break;
+				}
+			}
+			item->setHidden(!match);
+			if (match) {
+				anyShown = true;
+				if (!firstVisible)
+					firstVisible = item;
+			}
+		}
+		category->setHidden(!anyShown);
+	}
+
+	// While typing, the best match is the one Enter would pick.
+	if (!words.isEmpty() || !list->currentItem() || list->currentItem()->isHidden())
+		list->setCurrentItem(firstVisible);
+}
+
+void ActionPicker::moveSelection(int step)
+{
+	QList<QTreeWidgetItem *> visible;
+	for (QTreeWidgetItemIterator it(list); *it; ++it) {
+		if ((*it)->parent() && !(*it)->isHidden() && !(*it)->parent()->isHidden())
+			visible << *it;
+	}
+	if (visible.isEmpty())
+		return;
+
+	int index = visible.indexOf(list->currentItem());
+	index = index < 0 ? 0 : qBound(0, index + step, static_cast<int>(visible.size()) - 1);
+	list->setCurrentItem(visible[index]);
+	list->scrollToItem(visible[index]);
+}
+
+void ActionPicker::choose(QTreeWidgetItem *item)
+{
+	if (!item || !item->parent())
+		return;
+	QString choice = item->data(0, kChoiceRole).toString();
+	hide();
+	emit chosen(choice);
+}
+
+bool ActionPicker::eventFilter(QObject *watched, QEvent *event)
+{
+	if (watched == search && event->type() == QEvent::KeyPress) {
+		auto *key = static_cast<QKeyEvent *>(event);
+		switch (key->key()) {
+		case Qt::Key_Down:
+			moveSelection(1);
+			return true;
+		case Qt::Key_Up:
+			moveSelection(-1);
+			return true;
+		case Qt::Key_Return:
+		case Qt::Key_Enter:
+			choose(list->currentItem());
+			return true;
+		case Qt::Key_Escape:
+			hide();
+			return true;
+		default:
+			break;
+		}
+	}
+	return QWidget::eventFilter(watched, event);
+}
+
+// ============================================================================
 // ButtonEditor
 // ============================================================================
 
@@ -294,6 +603,7 @@ ButtonEditor::ButtonEditor(std::shared_ptr<ButtonConfig> config, const BarStyle 
 		setupUI();
 		populateSources();
 		populateScenes();
+		populateAudioSources();
 	}
 
 	populateFromConfig();
@@ -346,8 +656,8 @@ void ButtonEditor::focusFirstField()
 {
 	QWidget *first = labelEdit ? static_cast<QWidget *>(labelEdit)
 				   : (spacerWidthSpin ? static_cast<QWidget *>(spacerWidthSpin) : dividerThicknessSpin);
-	if (actionTypeCombo)
-		first = actionTypeCombo;
+	if (pickerButton)
+		first = pickerButton;
 	else if (displayMetricCombo)
 		first = displayMetricCombo;
 	if (first)
@@ -540,6 +850,13 @@ void ButtonEditor::buildIconCombo()
 	addEntry("OmniBar.Icon.StudioModeOn", "studio-mode-on.svg", true);
 	addEntry("OmniBar.Icon.StudioModeOff", "studio-mode-off.svg", true);
 	addEntry("OmniBar.Icon.Transition", "transition.svg", true);
+
+	addHeader("OmniBar.IconGroup.Scenes");
+	addEntry("OmniBar.Icon.Scene", "scene.svg", true);
+
+	addHeader("OmniBar.IconGroup.Audio");
+	addEntry("OmniBar.Icon.Audio", "audio.svg", true);
+	addEntry("OmniBar.Icon.AudioMute", "audio-mute.svg", true);
 
 	addHeader("OmniBar.IconGroup.Sources");
 	addEntry("OmniBar.Icon.Visibility", "visibility.svg", true);
@@ -806,22 +1123,23 @@ QWidget *ButtonEditor::createActionTab()
 		return page;
 	}
 
+	// What the button does, picked from a searchable list rather than a
+	// type and then a second list of that type's actions.
 	QFormLayout *typeForm = new QFormLayout();
-	actionTypeCombo = new QComboBox();
-	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.None"), static_cast<int>(ActionType::None));
-	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.Frontend"),
-				 static_cast<int>(ActionType::Frontend));
-	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.SourceHotkey"),
-				 static_cast<int>(ActionType::SourceHotkey));
-	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.SourceFilter"),
-				 static_cast<int>(ActionType::SourceFilter));
-	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.SourceVisibility"),
-				 static_cast<int>(ActionType::SourceVisibility));
-	connect(actionTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-		&ButtonEditor::onActionTypeChanged);
-	typeForm->addRow(obs_module_text("OmniBar.Settings.ActionType"), actionTypeCombo);
+	pickerButton = new QPushButton();
+	pickerButton->setAutoDefault(false);
+	// Reads as a field holding the choice, so its text sits at the start.
+	pickerButton->setStyleSheet(QStringLiteral("QPushButton { text-align: left; padding: 4px 8px; }"));
+	pickerButton->setIconSize(QSize(16, 16));
+	pickerButton->setToolTip(obs_module_text("OmniBar.Picker.Tooltip"));
+	picker = new ActionPicker(this);
+	connect(pickerButton, &QPushButton::clicked, this, [this]() { picker->popup(pickerButton, currentChoice); });
+	connect(picker, &ActionPicker::chosen, this, &ButtonEditor::setChoice);
+	typeForm->addRow(obs_module_text("OmniBar.Settings.Action"), pickerButton);
 	layout->addLayout(typeForm);
 
+	// The settings each kind needs, one page per kind. The order matches
+	// pageForChoice below.
 	actionStack = new QStackedWidget();
 
 	// No action
@@ -833,33 +1151,25 @@ QWidget *ButtonEditor::createActionTab()
 	noneLayout->addStretch();
 	actionStack->addWidget(nonePage);
 
-	// Frontend action
+	// OBS's own actions: the variant within the family, spelled out below.
 	QWidget *frontendPage = new QWidget();
-	QFormLayout *frontendForm = new QFormLayout(frontendPage);
-	frontendActionCombo = new QComboBox();
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.ToggleStream"), "toggle_streaming");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.StartStream"), "start_streaming");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.StopStream"), "stop_streaming");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.ToggleRecord"), "toggle_recording");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.StartRecord"), "start_recording");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.StopRecord"), "stop_recording");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.TogglePause"), "toggle_pause_recording");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.Pause"), "pause_recording");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.Unpause"), "unpause_recording");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.ToggleReplay"), "toggle_replay_buffer");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.StartReplay"), "start_replay_buffer");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.StopReplay"), "stop_replay_buffer");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.SaveReplay"), "save_replay_buffer");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.ToggleVirtualCam"), "toggle_virtual_cam");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.StartVirtualCam"), "start_virtual_cam");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.StopVirtualCam"), "stop_virtual_cam");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.ToggleStudioMode"), "toggle_studio_mode");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.EnableStudioMode"), "enable_studio_mode");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.DisableStudioMode"), "disable_studio_mode");
-	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.Transition"), "transition_to_program");
-	connect(frontendActionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-		&ButtonEditor::refreshPreview);
-	frontendForm->addRow(obs_module_text("OmniBar.Settings.Action"), frontendActionCombo);
+	QVBoxLayout *frontendLayout = new QVBoxLayout(frontendPage);
+	variantRow = new QWidget();
+	variantRow->setStyleSheet(QString::fromLatin1(kSegmentSheet));
+	variantLayout = new QHBoxLayout(variantRow);
+	variantLayout->setContentsMargins(0, 0, 0, 0);
+	variantLayout->setSpacing(4);
+	variantLayout->addWidget(new QLabel(obs_module_text("OmniBar.Settings.Variant")));
+	variantGroup = new QButtonGroup(this);
+	variantGroup->setExclusive(true);
+	connect(variantGroup, &QButtonGroup::idClicked, this, [this]() {
+		updatePickerButton();
+		refreshPreview();
+	});
+	frontendLayout->addWidget(variantRow);
+	frontendDescription = new QLabel();
+	frontendDescription->setForegroundRole(QPalette::PlaceholderText);
+	frontendLayout->addWidget(frontendDescription);
 	actionStack->addWidget(frontendPage);
 
 	// Source hotkey
@@ -900,6 +1210,47 @@ QWidget *ButtonEditor::createActionTab()
 	visibilityForm->addRow(obs_module_text("OmniBar.Settings.Scene"), visibilitySceneCombo);
 	visibilityForm->addRow(obs_module_text("OmniBar.Settings.Source"), visibilitySourceCombo);
 	actionStack->addWidget(visibilityPage);
+
+	// Scene
+	QWidget *scenePage = new QWidget();
+	QFormLayout *sceneForm = new QFormLayout(scenePage);
+	sceneCombo = new QComboBox();
+	connect(sceneCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &ButtonEditor::refreshPreview);
+	sceneForm->addRow(obs_module_text("OmniBar.Settings.Scene"), sceneCombo);
+	QLabel *sceneHint = new QLabel(obs_module_text("OmniBar.Settings.SceneHint"));
+	sceneHint->setWordWrap(true);
+	sceneForm->addRow(QString(), sceneHint);
+	actionStack->addWidget(scenePage);
+
+	// Mute
+	QWidget *mutePage = new QWidget();
+	QFormLayout *muteForm = new QFormLayout(mutePage);
+	audioSourceCombo = new QComboBox();
+	connect(audioSourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+		&ButtonEditor::refreshPreview);
+	muteForm->addRow(obs_module_text("OmniBar.Settings.Source"), audioSourceCombo);
+	QWidget *muteModes = new QWidget();
+	muteModes->setStyleSheet(QString::fromLatin1(kSegmentSheet));
+	QHBoxLayout *muteModeLayout = new QHBoxLayout(muteModes);
+	muteModeLayout->setContentsMargins(0, 0, 0, 0);
+	muteModeLayout->setSpacing(4);
+	muteModeGroup = new QButtonGroup(this);
+	muteModeGroup->setExclusive(true);
+	const std::pair<MuteMode, const char *> modes[] = {{MuteMode::Toggle, "OmniBar.Variant.Toggle"},
+							   {MuteMode::Mute, "OmniBar.Variant.Mute"},
+							   {MuteMode::Unmute, "OmniBar.Variant.Unmute"}};
+	for (const auto &mode : modes) {
+		QPushButton *button = new QPushButton(obs_module_text(mode.second));
+		button->setCheckable(true);
+		button->setAutoDefault(false);
+		muteModeGroup->addButton(button, static_cast<int>(mode.first));
+		muteModeLayout->addWidget(button);
+	}
+	muteModeLayout->addStretch();
+	muteModeGroup->button(static_cast<int>(MuteMode::Toggle))->setChecked(true);
+	connect(muteModeGroup, &QButtonGroup::idClicked, this, &ButtonEditor::refreshPreview);
+	muteForm->addRow(obs_module_text("OmniBar.Settings.Variant"), muteModes);
+	actionStack->addWidget(mutePage);
 
 	layout->addWidget(actionStack, 1);
 
@@ -1061,23 +1412,8 @@ void ButtonEditor::populateFromConfig()
 	confirmCombo->setEnabled(buttonConfig->hasAction());
 
 	ActionType type = buttonConfig->action->getType();
-	int typeIndex = actionTypeCombo->findData(static_cast<int>(type));
-	if (typeIndex >= 0) {
-		actionTypeCombo->setCurrentIndex(typeIndex);
-		actionStack->setCurrentIndex(typeIndex);
-	}
 
 	switch (type) {
-	case ActionType::Frontend: {
-		auto *frontendAction = dynamic_cast<FrontendAction *>(buttonConfig->action.get());
-		if (frontendAction) {
-			QString actionName = FrontendAction::getFrontendActionName(frontendAction->getActionType());
-			int actionIndex = frontendActionCombo->findData(actionName);
-			if (actionIndex >= 0)
-				frontendActionCombo->setCurrentIndex(actionIndex);
-		}
-		break;
-	}
 	case ActionType::SourceHotkey: {
 		auto *hotkeyAction = dynamic_cast<SourceHotkeyAction *>(buttonConfig->action.get());
 		if (hotkeyAction) {
@@ -1105,12 +1441,31 @@ void ButtonEditor::populateFromConfig()
 		}
 		break;
 	}
+	case ActionType::Scene: {
+		auto *sceneAction = dynamic_cast<SceneAction *>(buttonConfig->action.get());
+		if (sceneAction)
+			selectOrKeepMissing(sceneCombo, sceneAction->getSceneName());
+		break;
+	}
+	case ActionType::AudioMute: {
+		auto *muteAction = dynamic_cast<AudioMuteAction *>(buttonConfig->action.get());
+		if (muteAction) {
+			selectOrKeepMissing(audioSourceCombo, muteAction->getSourceName());
+			if (QAbstractButton *mode = muteModeGroup->button(static_cast<int>(muteAction->getMode())))
+				mode->setChecked(true);
+		}
+		break;
+	}
 	case ActionType::None:
+	case ActionType::Frontend:
 	case ActionType::Spacer:
 	case ActionType::Divider:
 	case ActionType::Display:
 		break;
 	}
+
+	// Last, so the variant row can find the action's own variant.
+	setChoice(choiceForAction(buttonConfig->action.get()));
 }
 
 void ButtonEditor::updateConfigFromUI(ButtonConfig &target)
@@ -1166,16 +1521,13 @@ void ButtonEditor::updateConfigFromUI(ButtonConfig &target)
 
 	target.confirmMode = static_cast<ConfirmMode>(confirmCombo->currentData().toInt());
 
-	ActionType type = static_cast<ActionType>(actionTypeCombo->currentData().toInt());
-	switch (type) {
+	switch (currentActionType()) {
 	case ActionType::None:
 		target.action = std::make_unique<NoAction>();
 		break;
-	case ActionType::Frontend: {
-		QString actionName = frontendActionCombo->currentData().toString();
-		target.action = std::make_unique<FrontendAction>(FrontendAction::getFrontendActionFromName(actionName));
+	case ActionType::Frontend:
+		target.action = std::make_unique<FrontendAction>(currentFrontendType());
 		break;
-	}
 	case ActionType::SourceHotkey:
 		target.action = std::make_unique<SourceHotkeyAction>(hotkeySourceCombo->currentData().toString(),
 								     hotkeyCombo->currentData().toString());
@@ -1189,15 +1541,18 @@ void ButtonEditor::updateConfigFromUI(ButtonConfig &target)
 			std::make_unique<SourceVisibilityAction>(visibilitySceneCombo->currentData().toString(),
 								 visibilitySourceCombo->currentData().toString());
 		break;
+	case ActionType::Scene:
+		target.action = std::make_unique<SceneAction>(sceneCombo->currentData().toString());
+		break;
+	case ActionType::AudioMute:
+		target.action = std::make_unique<AudioMuteAction>(audioSourceCombo->currentData().toString(),
+								  static_cast<MuteMode>(muteModeGroup->checkedId()));
+		break;
 	case ActionType::Spacer:
-		target.action = std::make_unique<SpacerAction>(10);
-		break;
 	case ActionType::Divider:
-		target.action = std::make_unique<DividerAction>();
-		break;
 	case ActionType::Display:
-		// Not offered in the type list: a readout is added as its own
-		// kind of entry and handled above.
+		// Not offered in the picker: each is added as its own kind of
+		// entry and handled above.
 		break;
 	}
 }
@@ -1219,14 +1574,118 @@ void ButtonEditor::refreshPreview()
 	emit changed();
 }
 
-void ButtonEditor::onActionTypeChanged(int index)
+// Which page of the action stack a choice shows, in the order the pages were
+// added in createActionTab.
+static int pageForChoice(const QString &choice)
 {
-	actionStack->setCurrentIndex(index);
+	if (!choiceFamily(choice).isEmpty())
+		return 1;
+	if (choice == QLatin1String("hotkey"))
+		return 2;
+	if (choice == QLatin1String("filter"))
+		return 3;
+	if (choice == QLatin1String("visibility"))
+		return 4;
+	if (choice == QLatin1String("scene"))
+		return 5;
+	if (choice == QLatin1String("mute"))
+		return 6;
+	return 0;
+}
+
+ActionType ButtonEditor::currentActionType() const
+{
+	switch (pageForChoice(currentChoice)) {
+	case 1:
+		return ActionType::Frontend;
+	case 2:
+		return ActionType::SourceHotkey;
+	case 3:
+		return ActionType::SourceFilter;
+	case 4:
+		return ActionType::SourceVisibility;
+	case 5:
+		return ActionType::Scene;
+	case 6:
+		return ActionType::AudioMute;
+	default:
+		return ActionType::None;
+	}
+}
+
+FrontendActionType ButtonEditor::currentFrontendType() const
+{
+	const auto members = FrontendAction::familyMembers(choiceFamily(currentChoice));
+	int checked = variantGroup ? variantGroup->checkedId() : -1;
+	for (FrontendActionType type : members) {
+		if (static_cast<int>(type) == checked)
+			return type;
+	}
+	return members.isEmpty() ? FrontendActionType::ToggleStreaming : members.first();
+}
+
+void ButtonEditor::populateVariants()
+{
+	// Keep the variant that was showing if the family is the same, else the
+	// entry's own, else the family's first - its toggle.
+	const auto members = FrontendAction::familyMembers(choiceFamily(currentChoice));
+	int keep = variantGroup->checkedId();
+	if (keep < 0 || !members.contains(static_cast<FrontendActionType>(keep))) {
+		keep = -1;
+		auto *own = buttonConfig ? dynamic_cast<FrontendAction *>(buttonConfig->action.get()) : nullptr;
+		if (own && members.contains(own->getActionType()))
+			keep = static_cast<int>(own->getActionType());
+	}
+
+	for (QAbstractButton *button : variantGroup->buttons()) {
+		variantGroup->removeButton(button);
+		delete button;
+	}
+	// The stretch after the buttons goes too; it is put back below.
+	while (variantLayout->count() > 1) {
+		QLayoutItem *item = variantLayout->takeAt(1);
+		delete item;
+	}
+
+	for (FrontendActionType type : members) {
+		QPushButton *button = new QPushButton(obs_module_text(FrontendAction::info(type).variantKey));
+		button->setCheckable(true);
+		button->setAutoDefault(false);
+		variantGroup->addButton(button, static_cast<int>(type));
+		variantLayout->addWidget(button);
+	}
+	variantLayout->addStretch();
+
+	if (QAbstractButton *selected = variantGroup->button(keep >= 0 ? keep : static_cast<int>(members.value(0))))
+		selected->setChecked(true);
+
+	// A family of one - Save replay, Transition - has nothing to choose.
+	variantRow->setVisible(members.size() > 1);
+}
+
+void ButtonEditor::updatePickerButton()
+{
+	pickerButton->setText(ActionPicker::choiceLabel(currentChoice));
+	pickerButton->setIcon(
+		omniBarBundledIcon(ActionPicker::choiceIcon(currentChoice), palette().color(QPalette::ButtonText), 16));
+	if (frontendDescription)
+		frontendDescription->setText(FrontendAction::getFrontendActionLabel(currentFrontendType()));
+}
+
+void ButtonEditor::setChoice(const QString &choice)
+{
+	currentChoice = findChoice(choice) ? choice : QStringLiteral("none");
+
+	actionStack->setCurrentIndex(pageForChoice(currentChoice));
+	if (currentActionType() == ActionType::Frontend)
+		populateVariants();
 	fitStackToCurrent(actionStack);
+	updatePickerButton();
+
 	if (allowGroup && groupCheck)
 		onGroupToggled(groupCheck->isChecked());
 	// Nothing to pulse to, or to ask about, without an action of its own.
-	bool hasAction = static_cast<ActionType>(actionTypeCombo->currentData().toInt()) != ActionType::None;
+	bool hasAction = currentActionType() != ActionType::None;
 	if (pulseCheck)
 		pulseCheck->setEnabled(hasAction);
 	if (confirmCombo)
@@ -1305,7 +1764,7 @@ void ButtonEditor::onGroupToggled(bool enabled)
 	}
 
 	auto expandMode = static_cast<GroupExpandMode>(groupExpandCombo->currentData().toInt());
-	auto actionType = static_cast<ActionType>(actionTypeCombo->currentData().toInt());
+	auto actionType = currentActionType();
 	ActivationCondition condition = groupConditionEditor->condition();
 
 	// Watching the button's own action needs there to be one.
@@ -1395,6 +1854,11 @@ void ButtonEditor::populateSources()
 void ButtonEditor::populateScenes()
 {
 	visibilitySceneCombo->clear();
+	sceneCombo->clear();
+
+	// A visibility button can follow whichever scene is on air, which is the
+	// empty name.
+	visibilitySceneCombo->addItem(obs_module_text("OmniBar.Settings.CurrentScene"), QString());
 
 	struct obs_frontend_source_list scenes = {};
 	obs_frontend_get_scenes(&scenes);
@@ -1402,9 +1866,26 @@ void ButtonEditor::populateScenes()
 		const char *name = obs_source_get_name(scenes.sources.array[i]);
 		if (name) {
 			visibilitySceneCombo->addItem(QString::fromUtf8(name), QString::fromUtf8(name));
+			sceneCombo->addItem(QString::fromUtf8(name), QString::fromUtf8(name));
 		}
 	}
 	obs_frontend_source_list_free(&scenes);
+}
+
+void ButtonEditor::populateAudioSources()
+{
+	audioSourceCombo->clear();
+
+	// Only sources that make sound can be muted.
+	obs_enum_sources(
+		[](void *data, obs_source_t *source) {
+			auto *combo = static_cast<QComboBox *>(data);
+			const char *name = obs_source_get_name(source);
+			if (name && (obs_source_get_output_flags(source) & OBS_SOURCE_AUDIO))
+				combo->addItem(QString::fromUtf8(name), QString::fromUtf8(name));
+			return true;
+		},
+		audioSourceCombo);
 }
 
 void ButtonEditor::populateFilters(const QString &sourceName)
@@ -1434,10 +1915,10 @@ void ButtonEditor::populateFilters(const QString &sourceName)
 void ButtonEditor::populateSceneItems(const QString &sceneName)
 {
 	visibilitySourceCombo->clear();
-	if (sceneName.isEmpty())
-		return;
 
-	obs_source_t *sceneSource = obs_get_source_by_name(sceneName.toUtf8().constData());
+	// Following the current scene offers what is in the scene on air now.
+	obs_source_t *sceneSource = sceneName.isEmpty() ? obs_frontend_get_current_scene()
+							: obs_get_source_by_name(sceneName.toUtf8().constData());
 	if (!sceneSource)
 		return;
 
@@ -1644,6 +2125,33 @@ void OmniBarConfig::dockPositionChanged(DockPosition position)
 	instance->setSelectedPosition(position);
 }
 
+bool OmniBarConfig::hasUnappliedChanges()
+{
+	return instance && instance->dirty;
+}
+
+void OmniBarConfig::reloadIfClean()
+{
+	if (!instance || instance->dirty)
+		return;
+
+	QTreeWidgetItem *current = instance->buttonTree->currentItem();
+	QString selectedId = current ? current->data(0, kConfigIdRole).toString() : QString();
+	instance->loadSettings();
+	if (!selectedId.isEmpty())
+		instance->selectEntry(selectedId);
+}
+
+void OmniBarConfig::showAddMenu()
+{
+	showDialog();
+	if (!instance)
+		return;
+	instance->tabs->setCurrentIndex(0);
+	// After the window has been laid out, so the menu opens under the +.
+	QTimer::singleShot(0, instance, &OmniBarConfig::onAddButton);
+}
+
 DockPosition OmniBarConfig::selectedPosition() const
 {
 	int id = positionGroup->checkedId();
@@ -1712,8 +2220,7 @@ void OmniBarConfig::setupUI()
 QWidget *OmniBarConfig::createFooter()
 {
 	QWidget *footer = new QWidget();
-	footer->setStyleSheet(QStringLiteral(
-		"QPushButton:checked { background-color: palette(highlight); color: palette(highlighted-text); }"));
+	footer->setStyleSheet(QString::fromLatin1(kSegmentSheet));
 	QHBoxLayout *layout = new QHBoxLayout(footer);
 	layout->setContentsMargins(0, 0, 0, 0);
 

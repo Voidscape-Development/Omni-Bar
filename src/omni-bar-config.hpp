@@ -29,6 +29,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QCheckBox>
 #include <QLabel>
 #include <QToolButton>
+#include <QHBoxLayout>
 #include <QHash>
 #include <QPointer>
 #include <memory>
@@ -83,6 +84,42 @@ private:
 	QComboBox *sourceCombo;
 };
 
+class QTreeWidgetItem;
+class QButtonGroup;
+
+// The searchable list an action is chosen from: everything a button can do,
+// grouped by what it belongs to, with start, stop and toggle of the same thing
+// offered as one entry. Typing narrows the list; arrow keys and Enter pick
+// without leaving the search box.
+class ActionPicker : public QWidget {
+	Q_OBJECT
+
+public:
+	explicit ActionPicker(QWidget *parent = nullptr);
+
+	// Opens under anchor with the current choice selected.
+	void popup(QWidget *anchor, const QString &currentChoice);
+
+	// Every choice the picker offers, by id, for code that needs a label or
+	// icon without opening the picker.
+	static QString choiceLabel(const QString &choice);
+	static QString choiceIcon(const QString &choice);
+
+signals:
+	void chosen(const QString &choice);
+
+protected:
+	bool eventFilter(QObject *watched, QEvent *event) override;
+
+private:
+	void applyFilter(const QString &text);
+	void choose(QTreeWidgetItem *item);
+	void moveSelection(int step);
+
+	QLineEdit *search;
+	QTreeWidget *list;
+};
+
 // Inspector for a single button, group, spacer, divider or readout. Every
 // change is written straight to the entry it was opened for and announced with
 // changed(), so the list and the bar preview follow along as the user types;
@@ -103,7 +140,8 @@ signals:
 	void changed();
 
 private slots:
-	void onActionTypeChanged(int index);
+	// A different kind of action was picked: show its settings.
+	void setChoice(const QString &choice);
 	void onIconChanged(int index);
 	void onIconBrowse();
 	void onFilterSourceChanged(const QString &sourceName);
@@ -135,7 +173,14 @@ private:
 	void populateFilters(const QString &sourceName);
 	void populateSceneItems(const QString &sceneName);
 	void populateHotkeys(const QString &sourceName);
+	void populateAudioSources();
+	void populateVariants();
 	void updateIconPreview();
+	void updatePickerButton();
+
+	// The kind of action chosen, and for OBS's own actions the variant.
+	ActionType currentActionType() const;
+	FrontendActionType currentFrontendType() const;
 	void updateColorButton();
 
 	// Applies the fields to the entry and says so - unless the fields are
@@ -174,9 +219,17 @@ private:
 	QCheckBox *pulseCheck = nullptr;
 
 	// Action
-	QComboBox *actionTypeCombo = nullptr;
+	QString currentChoice = QStringLiteral("none");
+	QPushButton *pickerButton = nullptr;
+	ActionPicker *picker = nullptr;
 	QStackedWidget *actionStack = nullptr;
-	QComboBox *frontendActionCombo = nullptr;
+	QWidget *variantRow = nullptr;
+	QHBoxLayout *variantLayout = nullptr;
+	QButtonGroup *variantGroup = nullptr;
+	QLabel *frontendDescription = nullptr;
+	QComboBox *sceneCombo = nullptr;
+	QComboBox *audioSourceCombo = nullptr;
+	QButtonGroup *muteModeGroup = nullptr;
 	QComboBox *hotkeySourceCombo = nullptr;
 	QComboBox *hotkeyCombo = nullptr;
 	QComboBox *filterSourceCombo = nullptr;
@@ -232,6 +285,17 @@ public:
 	// A hotkey can move the bar while the dialog is open. Without this the
 	// dialog would still be showing the old position and put it back on OK.
 	static void dockPositionChanged(DockPosition position);
+
+	// True while the dialog is open with edits not yet applied, which the
+	// bar's own menu must not write over.
+	static bool hasUnappliedChanges();
+
+	// The saved entries were changed from the bar's menu: an open dialog
+	// with nothing of its own to lose shows the new ones.
+	static void reloadIfClean();
+
+	// Opens the dialog with the Add menu showing, for "Add to bar...".
+	static void showAddMenu();
 
 private slots:
 	void onAddButton();
