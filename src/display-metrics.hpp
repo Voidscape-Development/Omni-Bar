@@ -75,12 +75,17 @@ void sample();
 QString value(DisplayMetric metric, ClockFormat clockFormat = ClockFormat::Hours24);
 
 // A representative reading, for the settings dialog's preview: a stream timer
-// should look like a stream timer even when nothing is streaming.
-QString previewValue(DisplayMetric metric, ClockFormat clockFormat = ClockFormat::Hours24);
+// should look like a stream timer even when nothing is streaming. Given a
+// simulated state, a metric whose feature is not running in it shows the
+// placeholder it would show on the bar, and the status chip says what that
+// state would make it say.
+QString previewValue(DisplayMetric metric, ClockFormat clockFormat = ClockFormat::Hours24,
+		     const ObsStateSnapshot *simulated = nullptr);
 
 // True while the thing this metric describes is running, which is what a
 // Display entry's "this button's action is active" condition tests.
 bool isLive(DisplayMetric metric);
+bool isLiveIn(DisplayMetric metric, const ObsStateSnapshot &state);
 
 // Whether the reading needs attention: dropped frames climbing, the CPU
 // pinned, the recording drive filling up. Metrics without a threshold are
@@ -92,7 +97,7 @@ bool hasThresholds(DisplayMetric metric);
 // they describe - the status chip lights up red while live and amber while
 // paused. None for the rest.
 BarState state(DisplayMetric metric);
-BarState previewState(DisplayMetric metric);
+BarState previewState(DisplayMetric metric, const ObsStateSnapshot *simulated = nullptr);
 
 // Translated name shown to the user.
 QString label(DisplayMetric metric);

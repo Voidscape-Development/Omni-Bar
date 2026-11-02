@@ -29,6 +29,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QPair>
 #include <obs-frontend-api.h>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "bar-style.hpp"
@@ -43,6 +44,10 @@ class QBoxLayout;
 // icon carries a second rendering in that colour for the button's active state.
 QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config, const QColor &tint, int size,
 			   const QColor &activeTint = QColor());
+
+// One of the plugin's own icons by file name, recoloured to tint - for the
+// settings window's own controls.
+QIcon omniBarBundledIcon(const QString &fileName, const QColor &tint, int size);
 
 // Property every widget on the bar carries with the id of the entry it was
 // built from, so the right-click menu can find what was clicked.
@@ -174,6 +179,10 @@ public:
 	// call on every tick: the text is only reapplied when it has changed.
 	void updateValue();
 
+	// In preview mode, read as the readout would in this state - a stream
+	// timer showing its placeholder when the preview is not live.
+	void setSimulatedState(const ObsStateSnapshot &state);
+
 	std::shared_ptr<ButtonConfig> getConfig() const { return displayConfig; }
 
 protected:
@@ -197,6 +206,7 @@ private:
 	// restyles when its colour actually changes.
 	QColor appliedTextColor;
 	bool sheetApplied = false;
+	std::optional<ObsStateSnapshot> simulated;
 };
 
 // A line across the bar, separating neighbouring buttons.

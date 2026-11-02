@@ -507,8 +507,34 @@ QString OmniBarMetrics::value(DisplayMetric metric, ClockFormat clockFormat)
 	return QString::fromUtf8(kNoValue);
 }
 
-QString OmniBarMetrics::previewValue(DisplayMetric metric, ClockFormat clockFormat)
+QString OmniBarMetrics::previewValue(DisplayMetric metric, ClockFormat clockFormat, const ObsStateSnapshot *simulated)
 {
+	if (simulated && metric == DisplayMetric::Status) {
+		QStringList parts;
+		if (simulated->streaming)
+			parts << translated("OmniBar.Status.Live").arg(QStringLiteral("01:23:45"));
+		if (simulated->recording)
+			parts << translated(simulated->recordingPaused ? "OmniBar.Status.Paused"
+								       : "OmniBar.Status.Recording")
+					 .arg(QStringLiteral("00:41:07"));
+		return parts.isEmpty() ? translated("OmniBar.Status.OffAir") : parts.join(QStringLiteral(" \u00b7 "));
+	}
+
+	// Something not running in the simulated state reads as it would on the
+	// bar: a placeholder rather than a number.
+	if (simulated && !isLiveIn(metric, *simulated)) {
+		switch (metric) {
+		case DisplayMetric::StreamTime:
+		case DisplayMetric::RecordTime:
+		case DisplayMetric::ReplayTime:
+		case DisplayMetric::ReplayLastSaved:
+		case DisplayMetric::VirtualCamTime:
+			return QString::fromUtf8(kNoDuration);
+		default:
+			return QString::fromUtf8(kNoValue);
+		}
+	}
+
 	switch (metric) {
 	case DisplayMetric::StreamTime:
 	case DisplayMetric::RecordTime:
@@ -656,9 +682,38 @@ BarState OmniBarMetrics::state(DisplayMetric metric)
 	return BarState::None;
 }
 
-BarState OmniBarMetrics::previewState(DisplayMetric metric)
+BarState OmniBarMetrics::previewState(DisplayMetric metric, const ObsStateSnapshot *simulated)
 {
-	return metric == DisplayMetric::Status ? BarState::Live : BarState::None;
+	if (metric != DisplayMetric::Status)
+		return BarState::None;
+	if (!simulated || simulated->streaming)
+		return BarState::Live;
+	if (simulated->recording)
+		return simulated->recordingPaused ? BarState::Paused : BarState::Recording;
+	return BarState::None;
+}
+
+bool OmniBarMetrics::isLiveIn(DisplayMetric metric, const ObsStateSnapshot &state)
+{
+	switch (metric) {
+	case DisplayMetric::StreamTime:
+	case DisplayMetric::StreamBitrate:
+	case DisplayMetric::StreamDropped:
+		return state.streaming;
+	case DisplayMetric::RecordTime:
+	case DisplayMetric::RecordBitrate:
+	case DisplayMetric::RecordSize:
+		return state.recording;
+	case DisplayMetric::ReplayTime:
+	case DisplayMetric::ReplayLastSaved:
+		return state.replayBuffer;
+	case DisplayMetric::VirtualCamTime:
+		return state.virtualCam;
+	case DisplayMetric::Status:
+		return state.streaming || state.recording;
+	default:
+		return true;
+	}
 }
 
 QString OmniBarMetrics::label(DisplayMetric metric)

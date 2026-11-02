@@ -18,11 +18,52 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "bar-style.hpp"
 #include <obs-module.h>
+#include <obs-frontend-api.h>
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QFontMetrics>
 #include <QPalette>
 #include <QtMath>
+
+ObsStateSnapshot ObsStateSnapshot::current()
+{
+	ObsStateSnapshot state;
+	state.streaming = obs_frontend_streaming_active();
+	state.recording = obs_frontend_recording_active();
+	state.recordingPaused = state.recording && obs_frontend_recording_paused();
+	state.replayBuffer = obs_frontend_replay_buffer_active();
+	state.virtualCam = obs_frontend_virtualcam_active();
+	state.studioMode = obs_frontend_preview_program_mode_active();
+	return state;
+}
+
+bool ObsStateSnapshot::isActive(BarState state) const
+{
+	switch (state) {
+	case BarState::Live:
+		return streaming;
+	case BarState::Recording:
+		return recording;
+	case BarState::Paused:
+		return recordingPaused;
+	case BarState::Replay:
+		return replayBuffer;
+	case BarState::VirtualCam:
+		return virtualCam;
+	case BarState::Studio:
+		return studioMode;
+	case BarState::None:
+		break;
+	}
+	return false;
+}
+
+bool ObsStateSnapshot::operator==(const ObsStateSnapshot &other) const
+{
+	return streaming == other.streaming && recording == other.recording &&
+	       recordingPaused == other.recordingPaused && replayBuffer == other.replayBuffer &&
+	       virtualCam == other.virtualCam && studioMode == other.studioMode;
+}
 
 bool omniBarIsDarkTheme()
 {

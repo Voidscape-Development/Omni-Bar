@@ -24,33 +24,34 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QStringList>
 
 // ActivationCondition implementation
-bool ActivationCondition::isSatisfied(const ButtonAction *action) const
+bool ActivationCondition::isSatisfied(const ButtonAction *action, const ObsStateSnapshot *simulated) const
 {
 	if (source == ConditionSource::Always)
 		return true;
 
+	ObsStateSnapshot obs = simulated ? *simulated : ObsStateSnapshot();
 	bool state = false;
 	switch (source) {
 	case ConditionSource::OwnAction:
-		state = action && action->isActive();
+		state = action && (simulated ? action->isActiveIn(*simulated) : action->isActive());
 		break;
 	case ConditionSource::Streaming:
-		state = obs_frontend_streaming_active();
+		state = simulated ? obs.streaming : obs_frontend_streaming_active();
 		break;
 	case ConditionSource::Recording:
-		state = obs_frontend_recording_active();
+		state = simulated ? obs.recording : obs_frontend_recording_active();
 		break;
 	case ConditionSource::RecordingPaused:
-		state = obs_frontend_recording_paused();
+		state = simulated ? obs.recordingPaused : obs_frontend_recording_paused();
 		break;
 	case ConditionSource::ReplayBuffer:
-		state = obs_frontend_replay_buffer_active();
+		state = simulated ? obs.replayBuffer : obs_frontend_replay_buffer_active();
 		break;
 	case ConditionSource::VirtualCam:
-		state = obs_frontend_virtualcam_active();
+		state = simulated ? obs.virtualCam : obs_frontend_virtualcam_active();
 		break;
 	case ConditionSource::StudioMode:
-		state = obs_frontend_preview_program_mode_active();
+		state = simulated ? obs.studioMode : obs_frontend_preview_program_mode_active();
 		break;
 	case ConditionSource::Always:
 		return true;
@@ -117,6 +118,12 @@ ActivationCondition ActivationCondition::deserialize(obs_data_t *data, const cha
 	}
 	condition.inverted = obs_data_get_bool(data, QString("%1_inverted").arg(prefix).toUtf8().constData());
 	return condition;
+}
+
+bool ButtonAction::isActiveIn(const ObsStateSnapshot &state) const
+{
+	BarState reports = barState();
+	return reports != BarState::None ? state.isActive(reports) : isActive();
 }
 
 QString ButtonAction::confirmationQuestion() const
@@ -895,6 +902,11 @@ DisplayAction::DisplayAction(DisplayMetric shown, int width) : metric(shown), mi
 bool DisplayAction::isActive() const
 {
 	return OmniBarMetrics::isLive(metric);
+}
+
+bool DisplayAction::isActiveIn(const ObsStateSnapshot &state) const
+{
+	return OmniBarMetrics::isLiveIn(metric, state);
 }
 
 QString DisplayAction::currentValue() const

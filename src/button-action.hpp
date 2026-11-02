@@ -97,8 +97,9 @@ struct ActivationCondition {
 	bool isSet() const { return source != ConditionSource::Always; }
 
 	// An unset condition always holds. action supplies the OwnAction source
-	// and may be null.
-	bool isSatisfied(const ButtonAction *action) const;
+	// and may be null. With a simulated state the test is made against that
+	// instead of what OBS is doing, for the settings dialog's preview.
+	bool isSatisfied(const ButtonAction *action, const ObsStateSnapshot *simulated = nullptr) const;
 
 	// Short phrase for the settings list.
 	QString describe() const;
@@ -120,6 +121,11 @@ public:
 
 	// What this action reports on, which picks the colour it lights up in.
 	virtual BarState barState() const { return BarState::None; }
+
+	// Whether the action would show as active in a simulated state. Actions
+	// that report on OBS's outputs answer from the state; the rest, such as a
+	// filter, have nothing simulated to go on and say what is true now.
+	virtual bool isActiveIn(const ObsStateSnapshot &state) const;
 
 	// True when OBS's own controls would ask before doing what this is about
 	// to do, given what is running right now.
@@ -311,6 +317,7 @@ public:
 	// Reports whether the metric has anything live behind it, which is what
 	// makes "only while this entry's own value is live" a usable condition.
 	bool isActive() const override;
+	bool isActiveIn(const ObsStateSnapshot &state) const override;
 	QString getDisplayName() const override;
 	obs_data_t *serialize() const override;
 

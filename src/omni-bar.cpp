@@ -226,6 +226,12 @@ static QString defaultIconName(const std::shared_ptr<ButtonConfig> &config)
 
 const char *const kOmniBarEntryIdProperty = "omniBarEntryId";
 
+QIcon omniBarBundledIcon(const QString &fileName, const QColor &tint, int size)
+{
+	QString path = findBundledIcon(fileName);
+	return path.isEmpty() ? QIcon() : loadIcon(path, tint, size, true, QColor());
+}
+
 QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config, const QColor &tint, int size,
 			   const QColor &activeTint)
 {
@@ -774,8 +780,9 @@ QColor OmniBarDisplay::currentTextColor() const
 	if (displayConfig->useCustomColor && displayConfig->customColor.isValid())
 		return displayConfig->customColor;
 
-	BarState state = previewMode ? OmniBarMetrics::previewState(display->getMetric())
-				     : OmniBarMetrics::state(display->getMetric());
+	BarState state = previewMode
+				 ? OmniBarMetrics::previewState(display->getMetric(), simulated ? &*simulated : nullptr)
+				 : OmniBarMetrics::state(display->getMetric());
 	if (state != BarState::None)
 		return appliedStyle.stateColor(state);
 
@@ -791,7 +798,8 @@ void OmniBarDisplay::updateValue()
 	if (!display)
 		return;
 
-	QString reading = previewMode ? OmniBarMetrics::previewValue(display->getMetric(), display->getClockFormat())
+	QString reading = previewMode ? OmniBarMetrics::previewValue(display->getMetric(), display->getClockFormat(),
+								     simulated ? &*simulated : nullptr)
 				      : display->currentValue();
 
 	// The configured label reads as a prefix - "Live 01:23:45" - so a row of
@@ -826,6 +834,12 @@ void OmniBarDisplay::updateValue()
 
 	conditionHolds = displayConfig->showCondition.isSatisfied(displayConfig->action.get());
 	refreshVisibility();
+}
+
+void OmniBarDisplay::setSimulatedState(const ObsStateSnapshot &state)
+{
+	simulated = state;
+	updateValue();
 }
 
 void OmniBarDisplay::refreshVisibility()

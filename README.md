@@ -157,20 +157,27 @@ Open **Tools → Omni Bar Settings**, or right-click the bar itself and choose *
 Right-clicking a button or readout also offers to edit that entry directly, and to move the bar to
 another edge.
 
-The **Buttons** tab lists what is on the bar. **Add** offers a button, a group, a display, a spacer or
-a divider.
-Drag a row to reorder it, or drop it onto a group row to move it into that group. **Delete** removes the
-selected row, **F2** or **Enter** edits it and **Ctrl+D** duplicates it. A button whose source, filter or
-hotkey cannot be found is marked in the list, and its editor keeps the stored name rather than
-switching it to another source. The same tab sets
-which edge of the window the bar docks to, or hides it with **None**.
+The settings window shows the bar you are building across the top, drawn with the bar's own widgets.
+**Preview as** shows it as it would look idle, live, recording or paused, with the replay buffer,
+virtual camera or studio mode running too, so conditions, state colours and pulses can be checked
+without going live. **Now** follows what OBS is actually doing. The preview can be turned vertical to
+see the bar as it would sit on a side edge, and clicking an entry in it selects that entry for editing.
 
-Double-click a row to edit it. The editor opens on what the entry does, with its appearance, when it
-is shown and, for a group, its children on the tabs beside. It previews the entry as the bar will actually draw it while
-you change its label, icon, colour and action. A display previews a representative reading, so it can
-be sized and placed without having to go live first.
+The **Buttons** tab lists what is on the bar, with the selected entry's settings beside it. Changes show
+in the preview as you make them and reach the real bar on **Apply** or **OK**; **Revert** goes back to
+what was last applied. The **+** button adds a button, a group, a display, a spacer, a flexible space or
+a divider. Drag a row to reorder it, or drop it onto a group row to put it inside that group; turning a
+group back into a plain button moves its buttons out rather than removing them. **Delete** removes the
+selected row, **F2** or **Enter** jumps to its settings and **Ctrl+D** duplicates it. A button whose
+source, filter or hotkey cannot be found is marked in the list and drawn faded in the preview, and its
+settings keep the stored name rather than switching it to another source.
 
-The **Appearance** tab holds the presets and every style value, with a live preview of the bar.
+The settings for an entry start with what it does, then how it looks, when it is shown and, for a
+group, how it opens.
+
+The **Appearance** tab shows every theme as a small strip of the bar drawn in that theme, then every
+style value under it. The row along the bottom of the window sets which edge the bar docks to, or hides
+it.
 
 Settings are written to `config.json` in the plugin's configuration directory, alongside your other
 OBS plugin settings, whenever OBS saves its own. Closing the settings window with changes that have not
@@ -203,6 +210,7 @@ configure step.
 | `src/omni-bar-config.cpp` | Settings dialog and the per-button editor |
 | `src/button-action.cpp` | Action types and the button configuration model |
 | `src/bar-style.cpp` | Style presets and the stylesheets built from them |
+| `src/bar-preview.cpp` | The bar preview across the top of the settings window |
 | `src/hotkeys.cpp` | The position hotkeys and their bindings |
 | `src/settings-manager.cpp` | Loading and saving `config.json` |
 

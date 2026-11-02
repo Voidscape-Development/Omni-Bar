@@ -51,6 +51,25 @@ enum class ActiveIndicator { Fill = 0, Underline = 1, Dot = 2, Ring = 3 };
 // up in when state colours are on.
 enum class BarState { None, Live, Recording, Paused, Replay, VirtualCam, Studio };
 
+// What OBS is doing, as one value: either read from OBS right now, or made up
+// by the settings dialog so the bar can be previewed as it would look live.
+struct ObsStateSnapshot {
+	bool streaming = false;
+	bool recording = false;
+	bool recordingPaused = false;
+	bool replayBuffer = false;
+	bool virtualCam = false;
+	bool studioMode = false;
+
+	static ObsStateSnapshot current();
+
+	// Whether the thing a state colour stands for is running.
+	bool isActive(BarState state) const;
+
+	bool operator==(const ObsStateSnapshot &other) const;
+	bool operator!=(const ObsStateSnapshot &other) const { return !(*this == other); }
+};
+
 // How urgently a readout wants looking at.
 enum class Severity { Normal, Warning, Critical };
 

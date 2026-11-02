@@ -20,7 +20,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <QDialog>
 #include <QTreeWidget>
-#include <QListWidget>
 #include <QComboBox>
 #include <QSpinBox>
 #include <QLineEdit>
@@ -31,6 +30,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QLabel>
 #include <QToolButton>
 #include <QHash>
+#include <QPointer>
 #include <memory>
 
 #include "bar-style.hpp"
@@ -83,33 +83,24 @@ private:
 	QComboBox *sourceCombo;
 };
 
-// Renders one button exactly as the bar would, over the bar's own backdrop.
-class ButtonPreview : public QWidget {
+// Inspector for a single button, group, spacer, divider or readout. Every
+// change is written straight to the entry it was opened for and announced with
+// changed(), so the list and the bar preview follow along as the user types;
+// the settings window decides when any of it is saved.
+class ButtonEditor : public QWidget {
 	Q_OBJECT
 
 public:
-	explicit ButtonPreview(QWidget *parent = nullptr);
-
-	void refresh(const BarStyle &style, const std::shared_ptr<ButtonConfig> &config, bool active);
-
-private:
-	QWidget *backdrop;
-	QBoxLayout *backdropLayout;
-	// A real bar widget, so placements the bar draws itself - such as a label
-	// above the icon - show up here too.
-	QWidget *previewWidget = nullptr;
-};
-
-// Editor for a single button, group, spacer, divider or readout.
-class ButtonEditDialog : public QDialog {
-	Q_OBJECT
-
-public:
-	ButtonEditDialog(std::shared_ptr<ButtonConfig> config, const BarStyle &style, bool allowGroup,
-			 QWidget *parent = nullptr);
-	~ButtonEditDialog();
+	ButtonEditor(std::shared_ptr<ButtonConfig> config, const BarStyle &style, bool allowGroup,
+		     QWidget *parent = nullptr);
 
 	std::shared_ptr<ButtonConfig> getButtonConfig() const { return buttonConfig; }
+
+	// Puts the keyboard in the first field, for F2 and Enter in the list.
+	void focusFirstField();
+
+signals:
+	void changed();
 
 private slots:
 	void onActionTypeChanged(int index);
@@ -122,14 +113,6 @@ private slots:
 	void onDividerColorClicked();
 	void onDividerValueChanged();
 	void onGroupToggled(bool enabled);
-	void onAddChild();
-	void onEditChild();
-	void onRemoveChild();
-	void onChildMoveUp();
-	void onChildMoveDown();
-	void onChildDoubleClicked(QListWidgetItem *item);
-	void onOk();
-	void onCancel();
 
 private:
 	void setupUI();
@@ -141,20 +124,25 @@ private:
 	QWidget *createActionTab();
 	QWidget *createVisibilityTab();
 	QWidget *createGroupTab();
+	QLabel *createHeader();
 
 	void populateFromConfig();
+	// Writes the fields into target. A group's children are the list's to
+	// manage and are never touched here.
 	void updateConfigFromUI(ButtonConfig &target);
 	void populateSources();
 	void populateScenes();
 	void populateFilters(const QString &sourceName);
 	void populateSceneItems(const QString &sceneName);
 	void populateHotkeys(const QString &sourceName);
-	void populateChildList();
 	void updateIconPreview();
 	void updateColorButton();
+
+	// Applies the fields to the entry and says so - unless the fields are
+	// still being filled in from it.
 	void refreshPreview();
 
-	// The config the preview renders: the working values, not the saved ones.
+	// The working values as a config of their own, for the icon preview.
 	std::shared_ptr<ButtonConfig> previewConfig();
 
 	std::shared_ptr<ButtonConfig> buttonConfig;
@@ -163,17 +151,14 @@ private:
 	bool spacerMode;
 	bool dividerMode;
 	// A readout keeps the full editor - it has a label, an icon and a
-	// condition like any other entry - with the action tab replaced by the
-	// choice of what it reads.
+	// condition like any other entry - with the action section replaced by
+	// the choice of what it reads.
 	bool displayEntryMode;
+	bool populating = false;
+	QLabel *headerLabel = nullptr;
 	QString customIconPath;
 	QColor customColor;
 	QColor dividerColor;
-	QList<std::shared_ptr<ButtonConfig>> workingChildren;
-
-	// Preview
-	ButtonPreview *preview = nullptr;
-	QCheckBox *previewActiveCheck = nullptr;
 
 	// Appearance
 	QLineEdit *labelEdit = nullptr;
@@ -213,8 +198,6 @@ private:
 	QSpinBox *dividerLengthSpin = nullptr;
 	QCheckBox *dividerColorCheck = nullptr;
 	QPushButton *dividerColorButton = nullptr;
-	OmniBarDivider *dividerPreview = nullptr;
-	std::shared_ptr<ButtonConfig> dividerPreviewConfig;
 
 	// Group
 	QCheckBox *groupCheck = nullptr;
@@ -223,17 +206,17 @@ private:
 	QComboBox *groupExpandCombo = nullptr;
 	ConditionEditor *groupConditionEditor = nullptr;
 	QLabel *groupHint = nullptr;
-	QListWidget *childList = nullptr;
-	QPushButton *addChildButton = nullptr;
-	QPushButton *editChildButton = nullptr;
-	QPushButton *removeChildButton = nullptr;
-	QPushButton *childUpButton = nullptr;
-	QPushButton *childDownButton = nullptr;
-
-	QTabWidget *tabs = nullptr;
-	int groupTabIndex = -1;
 };
 
+class OmniBarPreview;
+class QButtonGroup;
+class QScrollArea;
+class QSplitter;
+
+// The settings window: the bar drawn across the top, the entries on the left
+// with an inspector for the selected one beside them, and the bar's look on a
+// second tab. Edits show up in the preview straight away and reach the real
+// bar on Apply or OK.
 class OmniBarConfig : public QDialog {
 	Q_OBJECT
 
@@ -241,9 +224,9 @@ public:
 	explicit OmniBarConfig(QWidget *parent = nullptr);
 	~OmniBarConfig();
 
-	// Opens the dialog, or brings it forward. With an entry id it also opens
-	// the editor for that entry, which is how the bar's right-click menu
-	// edits the button under the pointer.
+	// Opens the dialog, or brings it forward. With an entry id it also
+	// selects that entry for editing, which is how the bar's right-click
+	// menu edits the button under the pointer.
 	static void showDialog(const QString &editId = QString());
 
 	// A hotkey can move the bar while the dialog is open. Without this the
@@ -257,14 +240,16 @@ private slots:
 	void onDuplicateButton();
 	void onMoveUp();
 	void onMoveDown();
-	void onItemDoubleClicked(QTreeWidgetItem *item, int column);
 	void onTreeReordered();
-	void onPresetChanged(int index);
+	void onSelectionChanged();
+	void onEditorChanged();
+	void onPresetChanged(int preset);
 	void onStyleValueChanged();
 	void onUseCustomColorsToggled(bool enabled);
 	void onApply();
 	void onOk();
 	void onCancel();
+	void onRevert();
 
 public slots:
 	// Closing with unsaved edits asks whether to keep them first, whether
@@ -275,36 +260,52 @@ private:
 	void setupUI();
 	QWidget *createButtonsTab();
 	QWidget *createAppearanceTab();
+	QWidget *createFooter();
 	void loadSettings();
 	void saveSettings();
 	void populateButtonTree();
 	void rebuildModelFromTree();
 	void updateStyleWidgets();
 	void refreshStylePreview();
+	void refreshBarPreview();
+	void refreshPresetCards();
 	void addNewEntry(std::shared_ptr<ButtonConfig> config);
 	void editEntry(const QString &id);
+	void selectEntry(const QString &id);
+	void showInspector(const std::shared_ptr<ButtonConfig> &config, bool allowGroup);
+	void updateTreeItem(QTreeWidgetItem *item, const std::shared_ptr<ButtonConfig> &config);
 	void markDirty();
 	void setDirty(bool value);
+	DockPosition selectedPosition() const;
+	void setSelectedPosition(DockPosition position);
 
 	// Config a tree row stands for, or nullptr for a row that has gone stale.
 	std::shared_ptr<ButtonConfig> configForItem(QTreeWidgetItem *item) const;
 	QTreeWidgetItem *createTreeItem(const std::shared_ptr<ButtonConfig> &config);
+	QTreeWidgetItem *itemForId(const QString &id) const;
 
 	static OmniBarConfig *instance;
 
-	// Button list
+	OmniBarPreview *barPreview = nullptr;
+	QTabWidget *tabs = nullptr;
+
+	// Entry list and inspector
 	ButtonTreeWidget *buttonTree = nullptr;
-	QPushButton *addButton = nullptr;
-	QPushButton *removeButton = nullptr;
-	QPushButton *editButton = nullptr;
-	QPushButton *duplicateButton = nullptr;
-	QPushButton *moveUpButton = nullptr;
-	QPushButton *moveDownButton = nullptr;
-	QComboBox *dockPositionCombo = nullptr;
+	QToolButton *addButton = nullptr;
+	QToolButton *removeButton = nullptr;
+	QToolButton *duplicateButton = nullptr;
+	QToolButton *moveUpButton = nullptr;
+	QToolButton *moveDownButton = nullptr;
+	QScrollArea *inspectorScroll = nullptr;
+	QPointer<ButtonEditor> editor;
+
+	// Footer
+	QButtonGroup *positionGroup = nullptr;
 	QLabel *unsavedLabel = nullptr;
 
 	// Style
-	QComboBox *presetCombo = nullptr;
+	QButtonGroup *presetGroup = nullptr;
+	QHash<int, QToolButton *> presetCards;
 	QSpinBox *iconSizeSpin = nullptr;
 	QSpinBox *spacingSpin = nullptr;
 	QSpinBox *buttonPaddingSpin = nullptr;
@@ -324,8 +325,6 @@ private:
 	QPushButton *buttonCheckedButton = nullptr;
 	QPushButton *buttonBorderButton = nullptr;
 	QPushButton *textColorButton = nullptr;
-	QWidget *stylePreviewBar = nullptr;
-	QList<OmniBarButton *> stylePreviewButtons;
 
 	// State
 	QList<std::shared_ptr<ButtonConfig>> workingButtons;

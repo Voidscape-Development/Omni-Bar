@@ -21,6 +21,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "button-action.hpp"
 #include "display-metrics.hpp"
 #include "settings-manager.hpp"
+#include "bar-preview.hpp"
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <QVBoxLayout>
@@ -45,6 +46,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QShortcut>
 #include <QKeySequence>
 #include <QScrollArea>
+#include <QSplitter>
+#include <QButtonGroup>
+#include <QTreeWidgetItemIterator>
 
 static const int kConfigIdRole = Qt::UserRole;
 static const int kConfigIsGroupRole = Qt::UserRole + 1;
@@ -102,6 +106,21 @@ static void selectOrKeepMissing(QComboBox *combo, const QString &value)
 	}
 	if (index >= 0)
 		combo->setCurrentIndex(index);
+}
+
+// A stacked widget is as tall as its tallest page, which leaves a gap under a
+// short one. Only the page showing is allowed a say in the size.
+static void fitStackToCurrent(QStackedWidget *stack)
+{
+	if (!stack)
+		return;
+	for (int i = 0; i < stack->count(); i++) {
+		bool current = i == stack->currentIndex();
+		stack->widget(i)->setSizePolicy(current ? QSizePolicy::Preferred : QSizePolicy::Ignored,
+						current ? QSizePolicy::Preferred : QSizePolicy::Ignored);
+	}
+	stack->adjustSize();
+	stack->updateGeometry();
 }
 
 // ============================================================================
@@ -243,68 +262,12 @@ void ButtonTreeWidget::dropEvent(QDropEvent *event)
 }
 
 // ============================================================================
-// ButtonPreview
+// ButtonEditor
 // ============================================================================
 
-ButtonPreview::ButtonPreview(QWidget *parent) : QWidget(parent)
-{
-	QVBoxLayout *layout = new QVBoxLayout(this);
-	layout->setContentsMargins(0, 0, 0, 0);
-
-	backdrop = new QWidget(this);
-	backdrop->setObjectName("OmniBarPreviewBackdrop");
-	backdrop->setMinimumHeight(96);
-
-	backdropLayout = new QVBoxLayout(backdrop);
-	backdropLayout->setContentsMargins(16, 16, 16, 16);
-
-	layout->addWidget(backdrop);
-}
-
-void ButtonPreview::refresh(const BarStyle &style, const std::shared_ptr<ButtonConfig> &config, bool active)
-{
-	if (!config)
-		return;
-
-	backdrop->setStyleSheet(style.panelStyleSheet(QStringLiteral("OmniBarPreviewBackdrop")));
-
-	// Rebuilt rather than restyled: a bar widget takes its config in the
-	// constructor, and using the real class is what keeps the preview honest.
-	delete previewWidget;
-	previewWidget = nullptr;
-
-	if (config->isDisplay()) {
-		// Preview mode puts a representative reading in, so the entry
-		// can be judged for width and placement even when nothing is
-		// streaming.
-		auto *display = new OmniBarDisplay(config, backdrop);
-		display->setPreviewMode(true);
-		display->applyStyle(style);
-		previewWidget = display;
-	} else {
-		auto *button = new OmniBarButton(config, backdrop);
-		button->setPreviewMode(true);
-		// A picture of a button, not a working one.
-		button->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-		button->applyStyle(style);
-		button->setGroupIndicator(config->isGroup, false, false);
-		button->setChecked(active);
-		// The preview sets the active state by hand rather than from an
-		// action, so the pulse has to be told to catch up with it.
-		button->refreshPulse();
-		previewWidget = button;
-	}
-
-	backdropLayout->addWidget(previewWidget, 0, Qt::AlignCenter);
-}
-
-// ============================================================================
-// ButtonEditDialog
-// ============================================================================
-
-ButtonEditDialog::ButtonEditDialog(std::shared_ptr<ButtonConfig> config, const BarStyle &barStyle, bool groupAllowed,
-				   QWidget *parent)
-	: QDialog(parent),
+ButtonEditor::ButtonEditor(std::shared_ptr<ButtonConfig> config, const BarStyle &barStyle, bool groupAllowed,
+			   QWidget *parent)
+	: QWidget(parent),
 	  buttonConfig(config),
 	  style(barStyle),
 	  allowGroup(groupAllowed),
@@ -317,14 +280,9 @@ ButtonEditDialog::ButtonEditDialog(std::shared_ptr<ButtonConfig> config, const B
 	if (displayEntryMode)
 		allowGroup = false;
 
-	if (spacerMode)
-		setWindowTitle(obs_module_text("OmniBar.Settings.EditSpacer"));
-	else if (dividerMode)
-		setWindowTitle(obs_module_text("OmniBar.Settings.EditDivider"));
-	else if (displayEntryMode)
-		setWindowTitle(obs_module_text("OmniBar.Settings.EditDisplay"));
-	else
-		setWindowTitle(obs_module_text("OmniBar.Settings.EditButton"));
+	// Filling the fields in from the entry must not write them straight
+	// back to it, half-filled.
+	populating = true;
 
 	if (spacerMode) {
 		setupSpacerUI();
@@ -344,33 +302,63 @@ ButtonEditDialog::ButtonEditDialog(std::shared_ptr<ButtonConfig> config, const B
 	// sure the group hint reflects the final state either way.
 	if (allowGroup && groupCheck)
 		onGroupToggled(groupCheck->isChecked());
+	fitStackToCurrent(actionStack);
 
-	refreshPreview();
-
-	// Open at the size the content asks for; the minimum above only governs
-	// how far the user can shrink it.
-	adjustSize();
+	populating = false;
 }
 
-void ButtonEditDialog::setupDividerUI()
+QLabel *ButtonEditor::createHeader()
 {
-	setMinimumWidth(360);
+	const char *key = "OmniBar.Inspector.Button";
+	if (spacerMode)
+		key = "OmniBar.Inspector.Spacer";
+	else if (dividerMode)
+		key = "OmniBar.Inspector.Divider";
+	else if (displayEntryMode)
+		key = "OmniBar.Inspector.Display";
+	else if (buttonConfig && buttonConfig->isGroup)
+		key = "OmniBar.Inspector.Group";
 
+	headerLabel = new QLabel(obs_module_text(key));
+	QFont font = headerLabel->font();
+	font.setBold(true);
+	font.setPointSizeF(font.pointSizeF() * 1.2);
+	headerLabel->setFont(font);
+	return headerLabel;
+}
+
+// A heading over one part of the inspector, in the small capitals used for
+// section labels across OBS.
+static QLabel *sectionHeading(const char *key)
+{
+	QLabel *heading = new QLabel(QString::fromUtf8(obs_module_text(key)).toUpper());
+	QFont font = heading->font();
+	font.setBold(true);
+	font.setPointSizeF(font.pointSizeF() * 0.85);
+	font.setLetterSpacing(QFont::PercentageSpacing, 108);
+	heading->setFont(font);
+	heading->setForegroundRole(QPalette::PlaceholderText);
+	heading->setContentsMargins(0, 10, 0, 2);
+	return heading;
+}
+
+void ButtonEditor::focusFirstField()
+{
+	QWidget *first = labelEdit ? static_cast<QWidget *>(labelEdit)
+				   : (spacerWidthSpin ? static_cast<QWidget *>(spacerWidthSpin) : dividerThicknessSpin);
+	if (actionTypeCombo)
+		first = actionTypeCombo;
+	else if (displayMetricCombo)
+		first = displayMetricCombo;
+	if (first)
+		first->setFocus(Qt::TabFocusReason);
+}
+
+void ButtonEditor::setupDividerUI()
+{
 	QVBoxLayout *mainLayout = new QVBoxLayout(this);
-
-	// A divider is small enough that seeing it beats describing it.
-	QWidget *backdrop = new QWidget();
-	backdrop->setObjectName("OmniBarPreviewBackdrop");
-	backdrop->setStyleSheet(style.panelStyleSheet(QStringLiteral("OmniBarPreviewBackdrop")));
-	QHBoxLayout *backdropLayout = new QHBoxLayout(backdrop);
-	backdropLayout->setContentsMargins(12, 12, 12, 12);
-	backdropLayout->setAlignment(Qt::AlignCenter);
-
-	dividerPreviewConfig = std::make_shared<ButtonConfig>();
-	dividerPreviewConfig->action = std::make_unique<DividerAction>();
-	dividerPreview = new OmniBarDivider(dividerPreviewConfig, Qt::Horizontal, style, backdrop);
-	backdropLayout->addWidget(dividerPreview);
-	mainLayout->addWidget(backdrop);
+	mainLayout->setContentsMargins(0, 0, 0, 0);
+	mainLayout->addWidget(createHeader());
 
 	QFormLayout *form = new QFormLayout();
 
@@ -379,7 +367,7 @@ void ButtonEditDialog::setupDividerUI()
 	dividerThicknessSpin->setValue(1);
 	dividerThicknessSpin->setSuffix(" px");
 	connect(dividerThicknessSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
-		&ButtonEditDialog::onDividerValueChanged);
+		&ButtonEditor::onDividerValueChanged);
 	form->addRow(obs_module_text("OmniBar.Settings.DividerThickness"), dividerThicknessSpin);
 
 	dividerLengthSpin = new QSpinBox();
@@ -387,7 +375,7 @@ void ButtonEditDialog::setupDividerUI()
 	dividerLengthSpin->setValue(70);
 	dividerLengthSpin->setSuffix(" %");
 	connect(dividerLengthSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
-		&ButtonEditDialog::onDividerValueChanged);
+		&ButtonEditor::onDividerValueChanged);
 	form->addRow(obs_module_text("OmniBar.Settings.DividerLength"), dividerLengthSpin);
 
 	QHBoxLayout *colorLayout = new QHBoxLayout();
@@ -403,11 +391,12 @@ void ButtonEditDialog::setupDividerUI()
 
 	dividerColorButton = new QPushButton();
 	dividerColorButton->setEnabled(false);
-	connect(dividerColorButton, &QPushButton::clicked, this, &ButtonEditDialog::onDividerColorClicked);
+	connect(dividerColorButton, &QPushButton::clicked, this, &ButtonEditor::onDividerColorClicked);
 	colorLayout->addWidget(dividerColorButton, 1);
 	form->addRow(obs_module_text("OmniBar.Settings.DividerColor"), colorLayout);
 
 	showConditionEditor = new ConditionEditor(false);
+	connect(showConditionEditor, &ConditionEditor::changed, this, &ButtonEditor::refreshPreview);
 	form->addRow(obs_module_text("OmniBar.Settings.ShowCondition"), showConditionEditor);
 
 	mainLayout->addLayout(form);
@@ -416,33 +405,15 @@ void ButtonEditDialog::setupDividerUI()
 	hint->setWordWrap(true);
 	mainLayout->addWidget(hint);
 	mainLayout->addStretch();
-
-	QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-	connect(buttonBox, &QDialogButtonBox::accepted, this, &ButtonEditDialog::onOk);
-	connect(buttonBox, &QDialogButtonBox::rejected, this, &ButtonEditDialog::onCancel);
-	mainLayout->addWidget(buttonBox);
 }
 
-void ButtonEditDialog::onDividerValueChanged()
+void ButtonEditor::onDividerValueChanged()
 {
-	if (!dividerPreview || !dividerPreviewConfig)
-		return;
-
-	auto *divider = dynamic_cast<DividerAction *>(dividerPreviewConfig->action.get());
-	if (!divider)
-		return;
-
-	divider->setThickness(dividerThicknessSpin->value());
-	divider->setLengthPercent(dividerLengthSpin->value());
-	if (dividerColorCheck->isChecked() && dividerColor.isValid())
-		divider->setCustomColor(dividerColor);
-	else
-		divider->clearCustomColor();
-
-	dividerPreview->applyStyle(Qt::Horizontal, style);
+	// The bar preview above draws the divider itself.
+	refreshPreview();
 }
 
-void ButtonEditDialog::onDividerColorClicked()
+void ButtonEditor::onDividerColorClicked()
 {
 	QColor initial = dividerColor.isValid() ? dividerColor : style.effectiveButtonBorder();
 	QColor chosen = QColorDialog::getColor(initial, this, obs_module_text("OmniBar.Settings.DividerColor"),
@@ -455,13 +426,11 @@ void ButtonEditDialog::onDividerColorClicked()
 	onDividerValueChanged();
 }
 
-ButtonEditDialog::~ButtonEditDialog() {}
-
-void ButtonEditDialog::setupSpacerUI()
+void ButtonEditor::setupSpacerUI()
 {
-	setMinimumWidth(340);
-
 	QVBoxLayout *mainLayout = new QVBoxLayout(this);
+	mainLayout->setContentsMargins(0, 0, 0, 0);
+	mainLayout->addWidget(createHeader());
 
 	QFormLayout *form = new QFormLayout();
 	spacerWidthSpin = new QSpinBox();
@@ -473,8 +442,11 @@ void ButtonEditDialog::setupSpacerUI()
 	spacerExpandCheck = new QCheckBox(obs_module_text("OmniBar.Settings.SpacerExpand"));
 	spacerExpandCheck->setToolTip(obs_module_text("OmniBar.Settings.SpacerExpandHint"));
 	form->addRow(QString(), spacerExpandCheck);
+	connect(spacerWidthSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, &ButtonEditor::refreshPreview);
+	connect(spacerExpandCheck, &QCheckBox::toggled, this, &ButtonEditor::refreshPreview);
 
 	showConditionEditor = new ConditionEditor(false);
+	connect(showConditionEditor, &ConditionEditor::changed, this, &ButtonEditor::refreshPreview);
 	form->addRow(obs_module_text("OmniBar.Settings.ShowCondition"), showConditionEditor);
 	mainLayout->addLayout(form);
 
@@ -482,62 +454,36 @@ void ButtonEditDialog::setupSpacerUI()
 	hint->setWordWrap(true);
 	mainLayout->addWidget(hint);
 	mainLayout->addStretch();
-
-	QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-	connect(buttonBox, &QDialogButtonBox::accepted, this, &ButtonEditDialog::onOk);
-	connect(buttonBox, &QDialogButtonBox::rejected, this, &ButtonEditDialog::onCancel);
-	mainLayout->addWidget(buttonBox);
 }
 
-void ButtonEditDialog::setupUI()
+void ButtonEditor::setupUI()
 {
-	// Sized from its content rather than a fixed floor, so the tabs are not
-	// padded out with empty space.
-	setMinimumSize(600, 400);
-
+	// One column of sections rather than tabs: the inspector scrolls, and
+	// every setting stays one glance away. What the entry does comes first,
+	// since the automatic icon and label both follow from it.
 	QVBoxLayout *mainLayout = new QVBoxLayout(this);
-	QHBoxLayout *panes = new QHBoxLayout();
+	mainLayout->setContentsMargins(0, 0, 0, 0);
+	mainLayout->setSpacing(2);
+	mainLayout->addWidget(createHeader());
 
-	// Left pane: a live picture of the button as the bar will draw it.
-	QVBoxLayout *leftPane = new QVBoxLayout();
-	QLabel *previewLabel = new QLabel(obs_module_text("OmniBar.Settings.Preview"));
-	leftPane->addWidget(previewLabel);
+	auto addSection = [mainLayout](const char *headingKey, QWidget *page) {
+		if (page->layout())
+			page->layout()->setContentsMargins(0, 0, 0, 0);
+		mainLayout->addWidget(sectionHeading(headingKey));
+		mainLayout->addWidget(page);
+	};
 
-	preview = new ButtonPreview();
-	preview->setFixedWidth(190);
-	leftPane->addWidget(preview);
-
-	previewActiveCheck = new QCheckBox(obs_module_text("OmniBar.Settings.PreviewActive"));
-	connect(previewActiveCheck, &QCheckBox::toggled, this, &ButtonEditDialog::refreshPreview);
-	leftPane->addWidget(previewActiveCheck);
-	leftPane->addStretch();
-
-	panes->addLayout(leftPane);
-
-	// Right pane: everything that can be configured.
-	// What the entry does comes first: the automatic icon and label are both
-	// derived from it, so it is the choice everything else follows.
-	tabs = new QTabWidget();
-	tabs->addTab(createActionTab(),
-		     obs_module_text(displayEntryMode ? "OmniBar.Settings.TabValue" : "OmniBar.Settings.TabAction"));
-	tabs->addTab(createAppearanceTab(), obs_module_text("OmniBar.Settings.TabAppearance"));
-	tabs->addTab(createVisibilityTab(), obs_module_text("OmniBar.Settings.TabVisibility"));
-	if (allowGroup) {
-		groupTabIndex = tabs->addTab(createGroupTab(), obs_module_text("OmniBar.Settings.TabGroup"));
-	}
-	panes->addWidget(tabs, 1);
-
-	mainLayout->addLayout(panes, 1);
-
-	QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-	connect(buttonBox, &QDialogButtonBox::accepted, this, &ButtonEditDialog::onOk);
-	connect(buttonBox, &QDialogButtonBox::rejected, this, &ButtonEditDialog::onCancel);
-	mainLayout->addWidget(buttonBox);
+	addSection(displayEntryMode ? "OmniBar.Settings.TabValue" : "OmniBar.Settings.TabAction", createActionTab());
+	addSection("OmniBar.Settings.TabAppearance", createAppearanceTab());
+	addSection("OmniBar.Settings.TabVisibility", createVisibilityTab());
+	if (allowGroup)
+		addSection("OmniBar.Settings.TabGroup", createGroupTab());
+	mainLayout->addStretch();
 }
 
 // The built-in set is large enough that a flat list is hard to scan, so it is
 // broken up by unselectable section headers with each entry showing its glyph.
-void ButtonEditDialog::buildIconCombo()
+void ButtonEditor::buildIconCombo()
 {
 	QStandardItemModel *model = new QStandardItemModel(iconCombo);
 	QColor tint = palette().color(QPalette::Text);
@@ -617,7 +563,7 @@ void ButtonEditDialog::buildIconCombo()
 
 // Grouped the same way the icon list is, so a readout is found by what it
 // belongs to rather than by reading seventeen names in a row.
-void ButtonEditDialog::buildMetricCombo()
+void ButtonEditor::buildMetricCombo()
 {
 	QStandardItemModel *model = new QStandardItemModel(displayMetricCombo);
 
@@ -671,7 +617,7 @@ void ButtonEditDialog::buildMetricCombo()
 		displayMetricCombo->findData(OmniBarMetrics::name(DisplayMetric::StreamTime)));
 }
 
-QWidget *ButtonEditDialog::createAppearanceTab()
+QWidget *ButtonEditor::createAppearanceTab()
 {
 	QWidget *page = new QWidget();
 	QFormLayout *form = new QFormLayout(page);
@@ -679,7 +625,7 @@ QWidget *ButtonEditDialog::createAppearanceTab()
 	labelEdit = new QLineEdit();
 	labelEdit->setPlaceholderText(obs_module_text(displayEntryMode ? "OmniBar.Settings.PrefixPlaceholder"
 								       : "OmniBar.Settings.LabelPlaceholder"));
-	connect(labelEdit, &QLineEdit::textChanged, this, &ButtonEditDialog::refreshPreview);
+	connect(labelEdit, &QLineEdit::textChanged, this, &ButtonEditor::refreshPreview);
 	form->addRow(obs_module_text(displayEntryMode ? "OmniBar.Settings.Prefix" : "OmniBar.Settings.Label"),
 		     labelEdit);
 
@@ -700,23 +646,23 @@ QWidget *ButtonEditDialog::createAppearanceTab()
 	displayModeCombo->addItem(obs_module_text("OmniBar.Display.TextBelow"),
 				  static_cast<int>(ButtonDisplayMode::TextBelow));
 	connect(displayModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-		&ButtonEditDialog::refreshPreview);
+		&ButtonEditor::refreshPreview);
 	form->addRow(obs_module_text("OmniBar.Settings.DisplayMode"), displayModeCombo);
 
 	tooltipEdit = new QLineEdit();
-	connect(tooltipEdit, &QLineEdit::textChanged, this, &ButtonEditDialog::refreshPreview);
+	connect(tooltipEdit, &QLineEdit::textChanged, this, &ButtonEditor::refreshPreview);
 	form->addRow(obs_module_text("OmniBar.Settings.Tooltip"), tooltipEdit);
 
 	// Icon selection
 	QHBoxLayout *iconLayout = new QHBoxLayout();
 	iconCombo = new QComboBox();
 	buildIconCombo();
-	connect(iconCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &ButtonEditDialog::onIconChanged);
+	connect(iconCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &ButtonEditor::onIconChanged);
 	iconLayout->addWidget(iconCombo, 1);
 
 	iconBrowseButton = new QPushButton("...");
 	iconBrowseButton->setFixedWidth(32);
-	connect(iconBrowseButton, &QPushButton::clicked, this, &ButtonEditDialog::onIconBrowse);
+	connect(iconBrowseButton, &QPushButton::clicked, this, &ButtonEditor::onIconBrowse);
 	iconLayout->addWidget(iconBrowseButton);
 
 	iconPreview = new QLabel();
@@ -731,8 +677,8 @@ QWidget *ButtonEditDialog::createAppearanceTab()
 	// left alone unless the user asks for it to be tinted.
 	tintIconCheck = new QCheckBox(obs_module_text("OmniBar.Settings.TintIcon"));
 	tintIconCheck->setToolTip(obs_module_text("OmniBar.Settings.TintIconHint"));
-	connect(tintIconCheck, &QCheckBox::toggled, this, &ButtonEditDialog::refreshPreview);
-	connect(tintIconCheck, &QCheckBox::toggled, this, &ButtonEditDialog::updateIconPreview);
+	connect(tintIconCheck, &QCheckBox::toggled, this, &ButtonEditor::refreshPreview);
+	connect(tintIconCheck, &QCheckBox::toggled, this, &ButtonEditor::updateIconPreview);
 	form->addRow(QString(), tintIconCheck);
 
 	// Per-button accent override
@@ -750,7 +696,7 @@ QWidget *ButtonEditDialog::createAppearanceTab()
 
 	customColorButton = new QPushButton();
 	customColorButton->setEnabled(false);
-	connect(customColorButton, &QPushButton::clicked, this, &ButtonEditDialog::onCustomColorClicked);
+	connect(customColorButton, &QPushButton::clicked, this, &ButtonEditor::onCustomColorClicked);
 	colorLayout->addWidget(customColorButton, 1);
 
 	form->addRow(obs_module_text(displayEntryMode ? "OmniBar.Settings.TextColour" : "OmniBar.Settings.AccentColor"),
@@ -766,7 +712,7 @@ QWidget *ButtonEditDialog::createAppearanceTab()
 		return page;
 
 	pulseCheck = new QCheckBox(obs_module_text("OmniBar.Settings.PulseWhenActive"));
-	connect(pulseCheck, &QCheckBox::toggled, this, &ButtonEditDialog::refreshPreview);
+	connect(pulseCheck, &QCheckBox::toggled, this, &ButtonEditor::refreshPreview);
 	form->addRow(obs_module_text("OmniBar.Settings.Pulse"), pulseCheck);
 
 	QLabel *pulseHint = new QLabel(obs_module_text("OmniBar.Settings.PulseHint"));
@@ -778,14 +724,14 @@ QWidget *ButtonEditDialog::createAppearanceTab()
 
 // When the entry is on the bar at all. Behaviour rather than looks, so it has a
 // tab of its own instead of sitting among the colours.
-QWidget *ButtonEditDialog::createVisibilityTab()
+QWidget *ButtonEditor::createVisibilityTab()
 {
 	QWidget *page = new QWidget();
 	QVBoxLayout *layout = new QVBoxLayout(page);
 
 	QFormLayout *form = new QFormLayout();
 	showConditionEditor = new ConditionEditor(true);
-	connect(showConditionEditor, &ConditionEditor::changed, this, &ButtonEditDialog::refreshPreview);
+	connect(showConditionEditor, &ConditionEditor::changed, this, &ButtonEditor::refreshPreview);
 	form->addRow(obs_module_text("OmniBar.Settings.ShowCondition"), showConditionEditor);
 	layout->addLayout(form);
 
@@ -796,7 +742,7 @@ QWidget *ButtonEditDialog::createVisibilityTab()
 	return page;
 }
 
-QWidget *ButtonEditDialog::createActionTab()
+QWidget *ButtonEditor::createActionTab()
 {
 	QWidget *page = new QWidget();
 	QVBoxLayout *layout = new QVBoxLayout(page);
@@ -809,7 +755,7 @@ QWidget *ButtonEditDialog::createActionTab()
 		displayMetricCombo = new QComboBox();
 		buildMetricCombo();
 		connect(displayMetricCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-			&ButtonEditDialog::refreshPreview);
+			&ButtonEditor::refreshPreview);
 		displayForm->addRow(obs_module_text("OmniBar.Settings.DisplayMetric"), displayMetricCombo);
 
 		// Only the clock has an hour to write, so the choice is put away
@@ -820,7 +766,7 @@ QWidget *ButtonEditDialog::createActionTab()
 		displayClockFormatCombo->addItem(OmniBarMetrics::clockFormatLabel(ClockFormat::Hours12),
 						 OmniBarMetrics::clockFormatName(ClockFormat::Hours12));
 		connect(displayClockFormatCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-			&ButtonEditDialog::refreshPreview);
+			&ButtonEditor::refreshPreview);
 
 		QLabel *clockFormatLabel = new QLabel(obs_module_text("OmniBar.Settings.ClockFormat"));
 		displayForm->addRow(clockFormatLabel, displayClockFormatCombo);
@@ -840,12 +786,13 @@ QWidget *ButtonEditDialog::createActionTab()
 		displayWidthSpin->setSpecialValueText(obs_module_text("OmniBar.Settings.DisplayWidthAuto"));
 		displayWidthSpin->setToolTip(obs_module_text("OmniBar.Settings.DisplayWidthHint"));
 		connect(displayWidthSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
-			&ButtonEditDialog::refreshPreview);
+			&ButtonEditor::refreshPreview);
 		displayForm->addRow(obs_module_text("OmniBar.Settings.DisplayWidth"), displayWidthSpin);
 
 		// Only some readings have a level worth warning about.
 		displayWarnCheck = new QCheckBox(obs_module_text("OmniBar.Settings.DisplayWarn"));
 		displayWarnCheck->setToolTip(obs_module_text("OmniBar.Settings.DisplayWarnHint"));
+		connect(displayWarnCheck, &QCheckBox::toggled, this, &ButtonEditor::refreshPreview);
 		displayForm->addRow(QString(), displayWarnCheck);
 		auto syncWarn = [this]() {
 			displayWarnCheck->setEnabled(OmniBarMetrics::hasThresholds(
@@ -871,7 +818,7 @@ QWidget *ButtonEditDialog::createActionTab()
 	actionTypeCombo->addItem(obs_module_text("OmniBar.ActionType.SourceVisibility"),
 				 static_cast<int>(ActionType::SourceVisibility));
 	connect(actionTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-		&ButtonEditDialog::onActionTypeChanged);
+		&ButtonEditor::onActionTypeChanged);
 	typeForm->addRow(obs_module_text("OmniBar.Settings.ActionType"), actionTypeCombo);
 	layout->addLayout(typeForm);
 
@@ -911,7 +858,7 @@ QWidget *ButtonEditDialog::createActionTab()
 	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.DisableStudioMode"), "disable_studio_mode");
 	frontendActionCombo->addItem(obs_module_text("OmniBar.Action.Transition"), "transition_to_program");
 	connect(frontendActionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-		&ButtonEditDialog::refreshPreview);
+		&ButtonEditor::refreshPreview);
 	frontendForm->addRow(obs_module_text("OmniBar.Settings.Action"), frontendActionCombo);
 	actionStack->addWidget(frontendPage);
 
@@ -920,7 +867,8 @@ QWidget *ButtonEditDialog::createActionTab()
 	QFormLayout *hotkeyForm = new QFormLayout(hotkeyPage);
 	hotkeySourceCombo = new QComboBox();
 	hotkeyCombo = new QComboBox();
-	connect(hotkeySourceCombo, &QComboBox::currentTextChanged, this, &ButtonEditDialog::onHotkeySourceChanged);
+	connect(hotkeySourceCombo, &QComboBox::currentTextChanged, this, &ButtonEditor::onHotkeySourceChanged);
+	connect(hotkeyCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &ButtonEditor::refreshPreview);
 	hotkeyForm->addRow(obs_module_text("OmniBar.Settings.Source"), hotkeySourceCombo);
 	hotkeyForm->addRow(obs_module_text("OmniBar.Settings.Hotkey"), hotkeyCombo);
 	QLabel *hotkeyHint = new QLabel(obs_module_text("OmniBar.Settings.HotkeyHint"));
@@ -935,6 +883,7 @@ QWidget *ButtonEditDialog::createActionTab()
 	filterCombo = new QComboBox();
 	connect(filterSourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
 		[this]() { onFilterSourceChanged(filterSourceCombo->currentData().toString()); });
+	connect(filterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &ButtonEditor::refreshPreview);
 	filterForm->addRow(obs_module_text("OmniBar.Settings.Source"), filterSourceCombo);
 	filterForm->addRow(obs_module_text("OmniBar.Settings.Filter"), filterCombo);
 	actionStack->addWidget(filterPage);
@@ -946,6 +895,8 @@ QWidget *ButtonEditDialog::createActionTab()
 	visibilitySourceCombo = new QComboBox();
 	connect(visibilitySceneCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
 		[this]() { onSceneChanged(visibilitySceneCombo->currentData().toString()); });
+	connect(visibilitySourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+		&ButtonEditor::refreshPreview);
 	visibilityForm->addRow(obs_module_text("OmniBar.Settings.Scene"), visibilitySceneCombo);
 	visibilityForm->addRow(obs_module_text("OmniBar.Settings.Source"), visibilitySourceCombo);
 	actionStack->addWidget(visibilityPage);
@@ -958,18 +909,19 @@ QWidget *ButtonEditDialog::createActionTab()
 	confirmCombo->addItem(obs_module_text("OmniBar.Confirm.Always"), static_cast<int>(ConfirmMode::Always));
 	confirmCombo->addItem(obs_module_text("OmniBar.Confirm.Never"), static_cast<int>(ConfirmMode::Never));
 	confirmCombo->setToolTip(obs_module_text("OmniBar.Confirm.Hint"));
+	connect(confirmCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &ButtonEditor::refreshPreview);
 	confirmForm->addRow(obs_module_text("OmniBar.Settings.Confirm"), confirmCombo);
 	layout->addLayout(confirmForm);
 	return page;
 }
 
-QWidget *ButtonEditDialog::createGroupTab()
+QWidget *ButtonEditor::createGroupTab()
 {
 	QWidget *page = new QWidget();
 	QVBoxLayout *layout = new QVBoxLayout(page);
 
 	groupCheck = new QCheckBox(obs_module_text("OmniBar.Settings.IsGroup"));
-	connect(groupCheck, &QCheckBox::toggled, this, &ButtonEditDialog::onGroupToggled);
+	connect(groupCheck, &QCheckBox::toggled, this, &ButtonEditor::onGroupToggled);
 	layout->addWidget(groupCheck);
 
 	groupSettings = new QWidget();
@@ -993,6 +945,8 @@ QWidget *ButtonEditDialog::createGroupTab()
 				  static_cast<int>(GroupExpandMode::Hover));
 	connect(groupExpandCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
 		[this]() { onGroupToggled(groupCheck->isChecked()); });
+	connect(groupDisplayCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+		&ButtonEditor::refreshPreview);
 	form->addRow(obs_module_text("OmniBar.Settings.GroupExpand"), groupExpandCombo);
 
 	groupConditionEditor = new ConditionEditor(true);
@@ -1005,39 +959,17 @@ QWidget *ButtonEditDialog::createGroupTab()
 	groupHint->setWordWrap(true);
 	settingsLayout->addWidget(groupHint);
 
-	settingsLayout->addWidget(new QLabel(obs_module_text("OmniBar.Settings.GroupChildren")));
-
-	childList = new QListWidget();
-	childList->setSelectionMode(QAbstractItemView::SingleSelection);
-	childList->setMinimumHeight(120);
-	connect(childList, &QListWidget::itemDoubleClicked, this, &ButtonEditDialog::onChildDoubleClicked);
-	settingsLayout->addWidget(childList, 1);
-
-	QHBoxLayout *childButtons = new QHBoxLayout();
-	addChildButton = new QPushButton(obs_module_text("OmniBar.Settings.AddButton"));
-	editChildButton = new QPushButton(obs_module_text("OmniBar.Settings.EditButton"));
-	removeChildButton = new QPushButton(obs_module_text("OmniBar.Settings.RemoveButton"));
-	childUpButton = new QPushButton(obs_module_text("OmniBar.Settings.MoveUp"));
-	childDownButton = new QPushButton(obs_module_text("OmniBar.Settings.MoveDown"));
-
-	connect(addChildButton, &QPushButton::clicked, this, &ButtonEditDialog::onAddChild);
-	connect(editChildButton, &QPushButton::clicked, this, &ButtonEditDialog::onEditChild);
-	connect(removeChildButton, &QPushButton::clicked, this, &ButtonEditDialog::onRemoveChild);
-	connect(childUpButton, &QPushButton::clicked, this, &ButtonEditDialog::onChildMoveUp);
-	connect(childDownButton, &QPushButton::clicked, this, &ButtonEditDialog::onChildMoveDown);
-
-	childButtons->addWidget(addChildButton);
-	childButtons->addWidget(editChildButton);
-	childButtons->addWidget(removeChildButton);
-	childButtons->addWidget(childUpButton);
-	childButtons->addWidget(childDownButton);
-	settingsLayout->addLayout(childButtons);
+	// The children are the list's business: they are dragged in and out of
+	// the group there, and edited like any other entry.
+	QLabel *childrenHint = new QLabel(obs_module_text("OmniBar.Settings.GroupChildrenHint"));
+	childrenHint->setWordWrap(true);
+	settingsLayout->addWidget(childrenHint);
 
 	layout->addWidget(groupSettings, 1);
 	return page;
 }
 
-void ButtonEditDialog::populateFromConfig()
+void ButtonEditor::populateFromConfig()
 {
 	if (!buttonConfig)
 		return;
@@ -1102,13 +1034,6 @@ void ButtonEditDialog::populateFromConfig()
 		int expandMode = groupExpandCombo->findData(static_cast<int>(buttonConfig->groupExpand));
 		groupExpandCombo->setCurrentIndex(expandMode >= 0 ? expandMode : 0);
 		groupConditionEditor->setCondition(buttonConfig->expandCondition);
-
-		workingChildren.clear();
-		for (const auto &child : buttonConfig->children) {
-			if (child)
-				workingChildren.append(child->clone());
-		}
-		populateChildList();
 		onGroupToggled(groupCheck->isChecked());
 	}
 
@@ -1188,7 +1113,7 @@ void ButtonEditDialog::populateFromConfig()
 	}
 }
 
-void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
+void ButtonEditor::updateConfigFromUI(ButtonConfig &target)
 {
 	target.showCondition = showConditionEditor->condition();
 
@@ -1237,13 +1162,6 @@ void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
 		target.groupDisplay = static_cast<GroupDisplayMode>(groupDisplayCombo->currentData().toInt());
 		target.groupExpand = static_cast<GroupExpandMode>(groupExpandCombo->currentData().toInt());
 		target.expandCondition = groupConditionEditor->condition();
-		target.children.clear();
-		if (target.isGroup) {
-			for (const auto &child : workingChildren) {
-				if (child)
-					target.children.append(child);
-			}
-		}
 	}
 
 	target.confirmMode = static_cast<ConfirmMode>(confirmCombo->currentData().toInt());
@@ -1284,7 +1202,7 @@ void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
 	}
 }
 
-std::shared_ptr<ButtonConfig> ButtonEditDialog::previewConfig()
+std::shared_ptr<ButtonConfig> ButtonEditor::previewConfig()
 {
 	auto config = std::make_shared<ButtonConfig>();
 	config->id = buttonConfig ? buttonConfig->id : config->id;
@@ -1292,16 +1210,19 @@ std::shared_ptr<ButtonConfig> ButtonEditDialog::previewConfig()
 	return config;
 }
 
-void ButtonEditDialog::refreshPreview()
+void ButtonEditor::refreshPreview()
 {
-	if (!preview)
+	if (populating || !buttonConfig)
 		return;
-	preview->refresh(style, previewConfig(), previewActiveCheck && previewActiveCheck->isChecked());
+
+	updateConfigFromUI(*buttonConfig);
+	emit changed();
 }
 
-void ButtonEditDialog::onActionTypeChanged(int index)
+void ButtonEditor::onActionTypeChanged(int index)
 {
 	actionStack->setCurrentIndex(index);
+	fitStackToCurrent(actionStack);
 	if (allowGroup && groupCheck)
 		onGroupToggled(groupCheck->isChecked());
 	// Nothing to pulse to, or to ask about, without an action of its own.
@@ -1313,7 +1234,7 @@ void ButtonEditDialog::onActionTypeChanged(int index)
 	refreshPreview();
 }
 
-void ButtonEditDialog::onIconChanged(int index)
+void ButtonEditor::onIconChanged(int index)
 {
 	Q_UNUSED(index);
 
@@ -1324,7 +1245,7 @@ void ButtonEditDialog::onIconChanged(int index)
 	refreshPreview();
 }
 
-void ButtonEditDialog::updateIconPreview()
+void ButtonEditor::updateIconPreview()
 {
 	// Resolved through the working config so an automatic icon picks the same
 	// glyph the bar would, and tinting matches the dialog's own text colour.
@@ -1336,7 +1257,7 @@ void ButtonEditDialog::updateIconPreview()
 	iconPreview->setPixmap(icon.pixmap(24, 24));
 }
 
-void ButtonEditDialog::onIconBrowse()
+void ButtonEditor::onIconBrowse()
 {
 	QString file = QFileDialog::getOpenFileName(this, obs_module_text("OmniBar.Settings.SelectIcon"), QString(),
 						    "Images (*.png *.svg *.ico *.jpg *.jpeg);;All files (*.*)");
@@ -1349,12 +1270,12 @@ void ButtonEditDialog::onIconBrowse()
 	refreshPreview();
 }
 
-void ButtonEditDialog::updateColorButton()
+void ButtonEditor::updateColorButton()
 {
 	setColorSwatch(customColorButton, customColorCheck && customColorCheck->isChecked() ? customColor : QColor());
 }
 
-void ButtonEditDialog::onCustomColorClicked()
+void ButtonEditor::onCustomColorClicked()
 {
 	QColor initial = customColor.isValid() ? customColor : style.effectiveButtonChecked();
 	QColor chosen = QColorDialog::getColor(initial, this, obs_module_text("OmniBar.Settings.AccentColor"),
@@ -1367,15 +1288,19 @@ void ButtonEditDialog::onCustomColorClicked()
 	refreshPreview();
 }
 
-void ButtonEditDialog::onGroupToggled(bool enabled)
+void ButtonEditor::onGroupToggled(bool enabled)
 {
 	if (!groupSettings)
 		return;
 
 	groupSettings->setEnabled(enabled);
+	if (headerLabel)
+		headerLabel->setText(obs_module_text(enabled ? "OmniBar.Inspector.Group" : "OmniBar.Inspector.Button"));
 
 	if (!enabled) {
 		groupHint->clear();
+		// Turning the group off is an edit like any other.
+		refreshPreview();
 		return;
 	}
 
@@ -1410,126 +1335,26 @@ void ButtonEditDialog::onGroupToggled(bool enabled)
 	refreshPreview();
 }
 
-void ButtonEditDialog::populateChildList()
-{
-	childList->clear();
-	for (const auto &child : workingChildren) {
-		if (!child)
-			continue;
-		QListWidgetItem *item = new QListWidgetItem(child->displayText());
-		item->setIcon(omniBarIconForConfig(child, palette().color(QPalette::Text), 16));
-		childList->addItem(item);
-	}
-}
-
-void ButtonEditDialog::onAddChild()
-{
-	auto config = std::make_shared<ButtonConfig>();
-	config->action = std::make_unique<FrontendAction>(FrontendActionType::ToggleRecording);
-
-	// Children never nest further, so the group tab is left out.
-	ButtonEditDialog dialog(config, style, false, this);
-	if (dialog.exec() != QDialog::Accepted)
-		return;
-
-	workingChildren.append(config);
-	populateChildList();
-	childList->setCurrentRow(workingChildren.size() - 1);
-}
-
-void ButtonEditDialog::onEditChild()
-{
-	int row = childList->currentRow();
-	if (row < 0 || row >= workingChildren.size())
-		return;
-
-	ButtonEditDialog dialog(workingChildren[row], style, false, this);
-	if (dialog.exec() != QDialog::Accepted)
-		return;
-
-	populateChildList();
-	childList->setCurrentRow(row);
-}
-
-void ButtonEditDialog::onRemoveChild()
-{
-	int row = childList->currentRow();
-	if (row < 0 || row >= workingChildren.size())
-		return;
-
-	workingChildren.removeAt(row);
-	populateChildList();
-}
-
-void ButtonEditDialog::onChildMoveUp()
-{
-	int row = childList->currentRow();
-	if (row <= 0)
-		return;
-
-	workingChildren.move(row, row - 1);
-	populateChildList();
-	childList->setCurrentRow(row - 1);
-}
-
-void ButtonEditDialog::onChildMoveDown()
-{
-	int row = childList->currentRow();
-	if (row < 0 || row >= workingChildren.size() - 1)
-		return;
-
-	workingChildren.move(row, row + 1);
-	populateChildList();
-	childList->setCurrentRow(row + 1);
-}
-
-void ButtonEditDialog::onChildDoubleClicked(QListWidgetItem *item)
-{
-	Q_UNUSED(item);
-	onEditChild();
-}
-
-void ButtonEditDialog::onFilterSourceChanged(const QString &sourceName)
+void ButtonEditor::onFilterSourceChanged(const QString &sourceName)
 {
 	populateFilters(sourceName);
 	refreshPreview();
 }
 
-void ButtonEditDialog::onHotkeySourceChanged(const QString &sourceName)
+void ButtonEditor::onHotkeySourceChanged(const QString &sourceName)
 {
 	Q_UNUSED(sourceName);
 	populateHotkeys(hotkeySourceCombo->currentData().toString());
 	refreshPreview();
 }
 
-void ButtonEditDialog::onSceneChanged(const QString &sceneName)
+void ButtonEditor::onSceneChanged(const QString &sceneName)
 {
 	populateSceneItems(sceneName);
 	refreshPreview();
 }
 
-void ButtonEditDialog::onOk()
-{
-	// Turning a group back into a plain button drops what was inside it, so
-	// say so rather than discarding the buttons quietly.
-	if (allowGroup && groupCheck && !groupCheck->isChecked() && !workingChildren.isEmpty()) {
-		QMessageBox::StandardButton answer =
-			QMessageBox::question(this, obs_module_text("OmniBar.Settings.TabGroup"),
-					      obs_module_text("OmniBar.Settings.ConfirmUngroup"));
-		if (answer != QMessageBox::Yes)
-			return;
-	}
-
-	updateConfigFromUI(*buttonConfig);
-	accept();
-}
-
-void ButtonEditDialog::onCancel()
-{
-	reject();
-}
-
-void ButtonEditDialog::populateSources()
+void ButtonEditor::populateSources()
 {
 	hotkeySourceCombo->clear();
 	filterSourceCombo->clear();
@@ -1539,7 +1364,7 @@ void ButtonEditDialog::populateSources()
 
 	obs_enum_sources(
 		[](void *data, obs_source_t *source) {
-			ButtonEditDialog *dialog = static_cast<ButtonEditDialog *>(data);
+			ButtonEditor *dialog = static_cast<ButtonEditor *>(data);
 			const char *name = obs_source_get_name(source);
 			if (name) {
 				QString sourceName = QString::fromUtf8(name);
@@ -1553,7 +1378,7 @@ void ButtonEditDialog::populateSources()
 	// Scenes accept filters and register hotkeys too.
 	obs_enum_scenes(
 		[](void *data, obs_source_t *source) {
-			ButtonEditDialog *dialog = static_cast<ButtonEditDialog *>(data);
+			ButtonEditor *dialog = static_cast<ButtonEditor *>(data);
 			const char *name = obs_source_get_name(source);
 			if (name) {
 				QString sourceName = QString::fromUtf8(name);
@@ -1567,7 +1392,7 @@ void ButtonEditDialog::populateSources()
 	populateHotkeys(QString());
 }
 
-void ButtonEditDialog::populateScenes()
+void ButtonEditor::populateScenes()
 {
 	visibilitySceneCombo->clear();
 
@@ -1582,7 +1407,7 @@ void ButtonEditDialog::populateScenes()
 	obs_frontend_source_list_free(&scenes);
 }
 
-void ButtonEditDialog::populateFilters(const QString &sourceName)
+void ButtonEditor::populateFilters(const QString &sourceName)
 {
 	filterCombo->clear();
 	if (sourceName.isEmpty())
@@ -1606,7 +1431,7 @@ void ButtonEditDialog::populateFilters(const QString &sourceName)
 	obs_source_release(source);
 }
 
-void ButtonEditDialog::populateSceneItems(const QString &sceneName)
+void ButtonEditor::populateSceneItems(const QString &sceneName)
 {
 	visibilitySourceCombo->clear();
 	if (sceneName.isEmpty())
@@ -1638,7 +1463,7 @@ void ButtonEditDialog::populateSceneItems(const QString &sceneName)
 	obs_source_release(sceneSource);
 }
 
-void ButtonEditDialog::populateHotkeys(const QString &sourceName)
+void ButtonEditor::populateHotkeys(const QString &sourceName)
 {
 	hotkeyCombo->clear();
 
@@ -1678,13 +1503,85 @@ void ButtonEditDialog::populateHotkeys(const QString &sourceName)
 
 OmniBarConfig *OmniBarConfig::instance = nullptr;
 
+// Small glyphs for the list's tool row, drawn in the dialog's text colour.
+static QIcon toolIcon(QWidget *widget, const char *file)
+{
+	return omniBarBundledIcon(QString::fromUtf8(file), widget->palette().color(QPalette::ButtonText), 16);
+}
+
+static QToolButton *listToolButton(QWidget *owner, const char *iconFile, const char *tipKey)
+{
+	QToolButton *button = new QToolButton();
+	button->setIcon(toolIcon(owner, iconFile));
+	button->setIconSize(QSize(16, 16));
+	button->setAutoRaise(true);
+	button->setToolTip(obs_module_text(tipKey));
+	button->setAccessibleName(obs_module_text(tipKey));
+	return button;
+}
+
+// A strip of the bar drawn in a given style - a status chip and a few
+// buttons, some active - for the theme gallery.
+static QPixmap renderStyleSample(const BarStyle &style)
+{
+	QWidget panel;
+	panel.setAttribute(Qt::WA_DontShowOnScreen, true);
+	panel.setObjectName("OmniBarPreviewBackdrop");
+	panel.setStyleSheet(style.panelStyleSheet(QStringLiteral("OmniBarPreviewBackdrop")));
+	QHBoxLayout *layout = new QHBoxLayout(&panel);
+	layout->setContentsMargins(8, 6, 8, 6);
+	layout->setSpacing(qMin(style.spacing, 4));
+
+	// Smaller than the real thing, so a card shows the whole strip.
+	BarStyle sample = style;
+	sample.iconSize = 18;
+	sample.buttonPadding = qMin(style.buttonPadding, 5);
+
+	ObsStateSnapshot live;
+	live.streaming = true;
+	live.recording = true;
+	live.replayBuffer = true;
+
+	auto status = std::make_shared<ButtonConfig>();
+	status->action = std::make_unique<DisplayAction>(DisplayMetric::Status);
+	status->displayMode = ButtonDisplayMode::TextOnly;
+	status->label = QString();
+	auto *chip = new OmniBarDisplay(status, &panel);
+	chip->setPreviewMode(true);
+	chip->applyStyle(sample);
+	ObsStateSnapshot liveOnly;
+	liveOnly.streaming = true;
+	chip->setSimulatedState(liveOnly);
+	layout->addWidget(chip);
+
+	const FrontendActionType samples[] = {FrontendActionType::ToggleStreaming, FrontendActionType::ToggleRecording,
+					      FrontendActionType::ToggleReplayBuffer,
+					      FrontendActionType::ToggleStudioMode};
+	for (FrontendActionType type : samples) {
+		auto config = std::make_shared<ButtonConfig>();
+		config->action = std::make_unique<FrontendAction>(type);
+		auto *button = new OmniBarButton(config, &panel);
+		button->setPreviewMode(true);
+		button->applyStyle(sample);
+		button->setChecked(config->action->isActiveIn(live));
+		layout->addWidget(button);
+	}
+
+	panel.show();
+	layout->activate();
+	panel.resize(panel.sizeHint());
+	QPixmap pixmap = panel.grab();
+	panel.hide();
+	return pixmap;
+}
+
 OmniBarConfig::OmniBarConfig(QWidget *parent) : QDialog(parent)
 {
 	setWindowTitle(obs_module_text("OmniBar.Settings.Title"));
-	setMinimumSize(560, 520);
+	setMinimumSize(820, 600);
 	setupUI();
 	loadSettings();
-	adjustSize();
+	resize(1000, 760);
 }
 
 OmniBarConfig::~OmniBarConfig()
@@ -1710,26 +1607,57 @@ void OmniBarConfig::showDialog(const QString &editId)
 
 void OmniBarConfig::editEntry(const QString &id)
 {
+	tabs->setCurrentIndex(0);
+	selectEntry(id);
+	if (editor)
+		editor->focusFirstField();
+}
+
+QTreeWidgetItem *OmniBarConfig::itemForId(const QString &id) const
+{
 	for (QTreeWidgetItemIterator it(buttonTree); *it; ++it) {
-		if ((*it)->data(0, kConfigIdRole).toString() == id) {
-			buttonTree->setCurrentItem(*it);
-			buttonTree->scrollToItem(*it);
-			onEditButton();
-			return;
-		}
+		if ((*it)->data(0, kConfigIdRole).toString() == id)
+			return *it;
 	}
+	return nullptr;
+}
+
+void OmniBarConfig::selectEntry(const QString &id)
+{
+	QTreeWidgetItem *item = itemForId(id);
+	if (!item)
+		return;
+	buttonTree->setCurrentItem(item);
+	buttonTree->scrollToItem(item);
+	// Selecting the row that is already current changes nothing, so the
+	// inspector is brought up to date either way.
+	if (!editor || !editor->getButtonConfig() || editor->getButtonConfig()->id != id)
+		onSelectionChanged();
 }
 
 void OmniBarConfig::dockPositionChanged(DockPosition position)
 {
-	if (!instance || !instance->dockPositionCombo)
+	if (!instance || !instance->positionGroup)
 		return;
 
 	// The move is already saved, so this is not an edit to keep.
-	QSignalBlocker blocker(instance->dockPositionCombo);
-	int index = instance->dockPositionCombo->findData(static_cast<int>(position));
-	if (index >= 0)
-		instance->dockPositionCombo->setCurrentIndex(index);
+	instance->setSelectedPosition(position);
+}
+
+DockPosition OmniBarConfig::selectedPosition() const
+{
+	int id = positionGroup->checkedId();
+	return id >= 0 ? static_cast<DockPosition>(id) : DockPosition::Top;
+}
+
+void OmniBarConfig::setSelectedPosition(DockPosition position)
+{
+	if (QAbstractButton *button = positionGroup->button(static_cast<int>(position)))
+		button->setChecked(true);
+	if (position == DockPosition::Left || position == DockPosition::Right)
+		barPreview->setOrientation(Qt::Vertical);
+	else if (position != DockPosition::None)
+		barPreview->setOrientation(Qt::Horizontal);
 }
 
 void OmniBarConfig::markDirty()
@@ -1764,59 +1692,117 @@ void OmniBarConfig::setupUI()
 {
 	QVBoxLayout *mainLayout = new QVBoxLayout(this);
 
-	QTabWidget *tabs = new QTabWidget();
+	// The bar being edited, across the top of both tabs: entries and looks
+	// both show up here as they change.
+	barPreview = new OmniBarPreview();
+	connect(barPreview, &OmniBarPreview::entryClicked, this, [this](const QString &id) {
+		tabs->setCurrentIndex(0);
+		selectEntry(id);
+	});
+	mainLayout->addWidget(barPreview);
+
+	tabs = new QTabWidget();
 	tabs->addTab(createButtonsTab(), obs_module_text("OmniBar.Settings.Buttons"));
 	tabs->addTab(createAppearanceTab(), obs_module_text("OmniBar.Settings.TabAppearance"));
 	mainLayout->addWidget(tabs, 1);
 
-	QHBoxLayout *footer = new QHBoxLayout();
+	mainLayout->addWidget(createFooter());
+}
+
+QWidget *OmniBarConfig::createFooter()
+{
+	QWidget *footer = new QWidget();
+	footer->setStyleSheet(QStringLiteral(
+		"QPushButton:checked { background-color: palette(highlight); color: palette(highlighted-text); }"));
+	QHBoxLayout *layout = new QHBoxLayout(footer);
+	layout->setContentsMargins(0, 0, 0, 0);
+
+	// Where the bar docks, as a row of choices rather than a drop-down: there
+	// are only five, and the current one should be visible at a glance.
+	layout->addWidget(new QLabel(obs_module_text("OmniBar.Settings.DockPosition")));
+	positionGroup = new QButtonGroup(this);
+	positionGroup->setExclusive(true);
+	const std::pair<DockPosition, const char *> positions[] = {{DockPosition::Top, "OmniBar.Position.Top"},
+								   {DockPosition::Left, "OmniBar.Position.Left"},
+								   {DockPosition::Bottom, "OmniBar.Position.Bottom"},
+								   {DockPosition::Right, "OmniBar.Position.Right"},
+								   {DockPosition::None, "OmniBar.Position.Hidden"}};
+	for (const auto &position : positions) {
+		QPushButton *button = new QPushButton(obs_module_text(position.second));
+		button->setCheckable(true);
+		button->setAutoDefault(false);
+		positionGroup->addButton(button, static_cast<int>(position.first));
+		layout->addWidget(button);
+	}
+	connect(positionGroup, &QButtonGroup::idClicked, this, [this](int id) {
+		setSelectedPosition(static_cast<DockPosition>(id));
+		markDirty();
+	});
+
+	layout->addStretch();
+
 	unsavedLabel = new QLabel(obs_module_text("OmniBar.Settings.Unsaved"));
 	unsavedLabel->setVisible(false);
-	footer->addWidget(unsavedLabel);
-	footer->addStretch();
+	layout->addWidget(unsavedLabel);
 
-	QDialogButtonBox *buttonBox =
-		new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Apply);
+	QDialogButtonBox *buttonBox = new QDialogButtonBox(QDialogButtonBox::Reset | QDialogButtonBox::Ok |
+							   QDialogButtonBox::Cancel | QDialogButtonBox::Apply);
+	buttonBox->button(QDialogButtonBox::Reset)->setText(obs_module_text("OmniBar.Settings.Revert"));
 	connect(buttonBox, &QDialogButtonBox::accepted, this, &OmniBarConfig::onOk);
 	connect(buttonBox, &QDialogButtonBox::rejected, this, &OmniBarConfig::onCancel);
 	connect(buttonBox->button(QDialogButtonBox::Apply), &QPushButton::clicked, this, &OmniBarConfig::onApply);
-	footer->addWidget(buttonBox);
-	mainLayout->addLayout(footer);
+	connect(buttonBox->button(QDialogButtonBox::Reset), &QPushButton::clicked, this, &OmniBarConfig::onRevert);
+	layout->addWidget(buttonBox);
+
+	return footer;
 }
 
 QWidget *OmniBarConfig::createButtonsTab()
 {
-	QWidget *page = new QWidget();
-	QVBoxLayout *layout = new QVBoxLayout(page);
+	QSplitter *splitter = new QSplitter(Qt::Horizontal);
+	splitter->setChildrenCollapsible(false);
+
+	// Left: the entries, with the usual list tools underneath.
+	QWidget *listPane = new QWidget();
+	QVBoxLayout *listLayout = new QVBoxLayout(listPane);
+	listLayout->setContentsMargins(0, 0, 0, 0);
+	listLayout->setSpacing(2);
 
 	buttonTree = new ButtonTreeWidget();
-	connect(buttonTree, &QTreeWidget::itemDoubleClicked, this, &OmniBarConfig::onItemDoubleClicked);
+	connect(buttonTree, &QTreeWidget::itemDoubleClicked, this, &OmniBarConfig::onEditButton);
 	connect(buttonTree, &ButtonTreeWidget::itemsReordered, this, &OmniBarConfig::onTreeReordered);
-	layout->addWidget(buttonTree, 1);
+	connect(buttonTree, &QTreeWidget::currentItemChanged, this, &OmniBarConfig::onSelectionChanged);
+	listLayout->addWidget(buttonTree, 1);
+
+	QHBoxLayout *tools = new QHBoxLayout();
+	tools->setSpacing(2);
+	addButton = listToolButton(this, "ui-add.svg", "OmniBar.Settings.AddButton");
+	removeButton = listToolButton(this, "ui-remove.svg", "OmniBar.Settings.RemoveButton");
+	duplicateButton = listToolButton(this, "ui-duplicate.svg", "OmniBar.Settings.Duplicate");
+	moveUpButton = listToolButton(this, "ui-up.svg", "OmniBar.Settings.MoveUp");
+	moveDownButton = listToolButton(this, "ui-down.svg", "OmniBar.Settings.MoveDown");
+	connect(addButton, &QToolButton::clicked, this, &OmniBarConfig::onAddButton);
+	connect(removeButton, &QToolButton::clicked, this, &OmniBarConfig::onRemoveButton);
+	connect(duplicateButton, &QToolButton::clicked, this, &OmniBarConfig::onDuplicateButton);
+	connect(moveUpButton, &QToolButton::clicked, this, &OmniBarConfig::onMoveUp);
+	connect(moveDownButton, &QToolButton::clicked, this, &OmniBarConfig::onMoveDown);
+	tools->addWidget(addButton);
+	tools->addWidget(removeButton);
+	tools->addWidget(duplicateButton);
+	tools->addStretch();
+	tools->addWidget(moveUpButton);
+	tools->addWidget(moveDownButton);
+	listLayout->addLayout(tools);
 
 	QLabel *hint = new QLabel(obs_module_text("OmniBar.Settings.TreeHint"));
 	hint->setWordWrap(true);
-	layout->addWidget(hint);
-
-	QHBoxLayout *listButtonLayout = new QHBoxLayout();
-	addButton = new QPushButton(obs_module_text("OmniBar.Settings.AddButton"));
-	editButton = new QPushButton(obs_module_text("OmniBar.Settings.EditButton"));
-	duplicateButton = new QPushButton(obs_module_text("OmniBar.Settings.Duplicate"));
-	removeButton = new QPushButton(obs_module_text("OmniBar.Settings.RemoveButton"));
-	moveUpButton = new QPushButton(obs_module_text("OmniBar.Settings.MoveUp"));
-	moveDownButton = new QPushButton(obs_module_text("OmniBar.Settings.MoveDown"));
-
-	connect(addButton, &QPushButton::clicked, this, &OmniBarConfig::onAddButton);
-	connect(editButton, &QPushButton::clicked, this, &OmniBarConfig::onEditButton);
-	connect(duplicateButton, &QPushButton::clicked, this, &OmniBarConfig::onDuplicateButton);
-	connect(removeButton, &QPushButton::clicked, this, &OmniBarConfig::onRemoveButton);
-	connect(moveUpButton, &QPushButton::clicked, this, &OmniBarConfig::onMoveUp);
-	connect(moveDownButton, &QPushButton::clicked, this, &OmniBarConfig::onMoveDown);
+	hint->setForegroundRole(QPalette::PlaceholderText);
+	listLayout->addWidget(hint);
 
 	// The usual list keys: Delete removes, F2 or Enter edits, Ctrl+D copies.
 	auto addShortcut = [this](const QKeySequence &keys, void (OmniBarConfig::*slot)()) {
 		QShortcut *shortcut = new QShortcut(keys, buttonTree);
-		shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+		shortcut->setContext(Qt::WidgetShortcut);
 		connect(shortcut, &QShortcut::activated, this, slot);
 	};
 	addShortcut(QKeySequence::Delete, &OmniBarConfig::onRemoveButton);
@@ -1824,30 +1810,18 @@ QWidget *OmniBarConfig::createButtonsTab()
 	addShortcut(QKeySequence(Qt::Key_Return), &OmniBarConfig::onEditButton);
 	addShortcut(QKeySequence(Qt::CTRL | Qt::Key_D), &OmniBarConfig::onDuplicateButton);
 
-	listButtonLayout->addWidget(addButton);
-	listButtonLayout->addWidget(editButton);
-	listButtonLayout->addWidget(duplicateButton);
-	listButtonLayout->addWidget(removeButton);
-	listButtonLayout->addStretch();
-	listButtonLayout->addWidget(moveUpButton);
-	listButtonLayout->addWidget(moveDownButton);
-	layout->addLayout(listButtonLayout);
+	// Right: whatever is selected, edited in place.
+	inspectorScroll = new QScrollArea();
+	inspectorScroll->setWidgetResizable(true);
+	inspectorScroll->setFrameShape(QFrame::NoFrame);
 
-	QGroupBox *dockGroup = new QGroupBox(obs_module_text("OmniBar.Settings.DockSettings"));
-	QFormLayout *dockForm = new QFormLayout(dockGroup);
-	dockPositionCombo = new QComboBox();
-	dockPositionCombo->addItem(obs_module_text("OmniBar.Position.Top"), static_cast<int>(DockPosition::Top));
-	dockPositionCombo->addItem(obs_module_text("OmniBar.Position.Left"), static_cast<int>(DockPosition::Left));
-	dockPositionCombo->addItem(obs_module_text("OmniBar.Position.Bottom"), static_cast<int>(DockPosition::Bottom));
-	dockPositionCombo->addItem(obs_module_text("OmniBar.Position.Right"), static_cast<int>(DockPosition::Right));
-	dockPositionCombo->addItem(obs_module_text("OmniBar.Position.None"), static_cast<int>(DockPosition::None));
-	dockForm->addRow(obs_module_text("OmniBar.Settings.DockPosition"), dockPositionCombo);
-	connect(dockPositionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-		&OmniBarConfig::markDirty);
+	splitter->addWidget(listPane);
+	splitter->addWidget(inspectorScroll);
+	splitter->setStretchFactor(0, 2);
+	splitter->setStretchFactor(1, 3);
+	splitter->setSizes({360, 560});
 
-	layout->addWidget(dockGroup);
-
-	return page;
+	return splitter;
 }
 
 QWidget *OmniBarConfig::createAppearanceTab()
@@ -1862,8 +1836,18 @@ QWidget *OmniBarConfig::createAppearanceTab()
 	QVBoxLayout *layout = new QVBoxLayout(page);
 	scroll->setWidget(page);
 
-	QFormLayout *presetForm = new QFormLayout();
-	presetCombo = new QComboBox();
+	// Themes, each card drawn in its own style so it can be chosen by eye.
+	QGroupBox *themeGroup = new QGroupBox(obs_module_text("OmniBar.Settings.Preset"));
+	QGridLayout *themeGrid = new QGridLayout(themeGroup);
+	themeGrid->setSpacing(8);
+	// The chosen theme is outlined in the highlight colour.
+	themeGroup->setStyleSheet(
+		QStringLiteral("QToolButton { border: 1px solid palette(mid); border-radius: 6px; padding: 6px; }"
+			       "QToolButton:hover { border-color: palette(highlight); }"
+			       "QToolButton:checked { border: 2px solid palette(highlight); }"));
+	presetGroup = new QButtonGroup(this);
+	presetGroup->setExclusive(true);
+
 	const std::pair<StylePreset, const char *> presets[] = {
 		{StylePreset::ObsNative, "OmniBar.Preset.ObsNative"},
 		{StylePreset::Broadcast, "OmniBar.Preset.Broadcast"},
@@ -1876,58 +1860,23 @@ QWidget *OmniBarConfig::createAppearanceTab()
 		{StylePreset::HighContrast, "OmniBar.Preset.HighContrast"},
 		{StylePreset::Daylight, "OmniBar.Preset.Daylight"},
 		{StylePreset::Custom, "OmniBar.Preset.Custom"}};
-	for (const auto &preset : presets)
-		presetCombo->addItem(obs_module_text(preset.second), static_cast<int>(preset.first));
-	connect(presetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-		&OmniBarConfig::onPresetChanged);
-	presetForm->addRow(obs_module_text("OmniBar.Settings.Preset"), presetCombo);
-	layout->addLayout(presetForm);
 
-	// Live preview of the bar itself.
-	stylePreviewBar = new QWidget();
-	stylePreviewBar->setObjectName("OmniBarPreviewBackdrop");
-	QHBoxLayout *previewLayout = new QHBoxLayout(stylePreviewBar);
-	previewLayout->setContentsMargins(8, 8, 8, 8);
-	previewLayout->setAlignment(Qt::AlignLeft);
-
-	// A status chip, then one sample of each state colour, so a theme can be
-	// judged on how it shows going live as well as how it looks at rest.
-	auto status = std::make_shared<ButtonConfig>();
-	status->action = std::make_unique<DisplayAction>(DisplayMetric::Status);
-	status->displayMode = ButtonDisplayMode::TextOnly;
-	OmniBarDisplay *statusPreview = new OmniBarDisplay(status, stylePreviewBar);
-	statusPreview->setPreviewMode(true);
-	previewLayout->addWidget(statusPreview);
-
-	struct SampleSpec {
-		FrontendActionType action;
-		bool checked;
-		bool pulse;
-	};
-	const SampleSpec samples[] = {{FrontendActionType::ToggleStreaming, true, false},
-				      {FrontendActionType::ToggleRecording, true, true},
-				      {FrontendActionType::TogglePauseRecording, false, false},
-				      {FrontendActionType::ToggleReplayBuffer, true, false},
-				      {FrontendActionType::ToggleVirtualCam, false, false},
-				      {FrontendActionType::ToggleStudioMode, false, false}};
-
-	for (const auto &sample : samples) {
-		auto config = std::make_shared<ButtonConfig>();
-		config->action = std::make_unique<FrontendAction>(sample.action);
-		// The pulsing sample lets the speed and intensity below be judged by
-		// eye rather than by number.
-		config->pulseWhenActive = sample.pulse;
-
-		// Real bar buttons, so the preview draws exactly as the bar will.
-		// The button keeps the config alive.
-		OmniBarButton *button = new OmniBarButton(config, stylePreviewBar);
-		button->setPreviewMode(true);
-		button->setChecked(sample.checked);
-		button->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-		previewLayout->addWidget(button);
-		stylePreviewButtons.append(button);
+	const int columns = 3;
+	int index = 0;
+	for (const auto &preset : presets) {
+		QToolButton *card = new QToolButton();
+		card->setText(obs_module_text(preset.second));
+		card->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+		card->setCheckable(true);
+		card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+		card->setAccessibleName(obs_module_text(preset.second));
+		presetGroup->addButton(card, static_cast<int>(preset.first));
+		presetCards.insert(static_cast<int>(preset.first), card);
+		themeGrid->addWidget(card, index / columns, index % columns);
+		index++;
 	}
-	layout->addWidget(stylePreviewBar);
+	connect(presetGroup, &QButtonGroup::idClicked, this, &OmniBarConfig::onPresetChanged);
+	layout->addWidget(themeGroup);
 
 	// Colour swatches. Theme colours turn custom colours on when picked,
 	// since they are otherwise ignored; state and warning colours apply
@@ -2065,6 +2014,19 @@ QWidget *OmniBarConfig::createAppearanceTab()
 	return scroll;
 }
 
+void OmniBarConfig::refreshPresetCards()
+{
+	// The named themes only change with the OBS palette; Custom shows
+	// whatever is being built.
+	for (auto it = presetCards.constBegin(); it != presetCards.constEnd(); ++it) {
+		auto preset = static_cast<StylePreset>(it.key());
+		BarStyle cardStyle = preset == StylePreset::Custom ? workingStyle : BarStyle::fromPreset(preset);
+		QPixmap sample = renderStyleSample(cardStyle);
+		it.value()->setIcon(QIcon(sample));
+		it.value()->setIconSize(sample.size() / sample.devicePixelRatio());
+	}
+}
+
 void OmniBarConfig::loadSettings()
 {
 	workingButtons.clear();
@@ -2075,12 +2037,15 @@ void OmniBarConfig::loadSettings()
 	}
 	populateButtonTree();
 
-	int posIndex = dockPositionCombo->findData(static_cast<int>(SettingsManager::getDockPosition()));
-	if (posIndex >= 0)
-		dockPositionCombo->setCurrentIndex(posIndex);
+	setSelectedPosition(SettingsManager::getDockPosition());
 
 	workingStyle = SettingsManager::getStyle();
 	updateStyleWidgets();
+	refreshPresetCards();
+
+	barPreview->setBarStyle(workingStyle);
+	refreshBarPreview();
+	onSelectionChanged();
 	setDirty(false);
 }
 
@@ -2089,7 +2054,7 @@ void OmniBarConfig::saveSettings()
 	rebuildModelFromTree();
 
 	SettingsManager::setButtons(workingButtons);
-	SettingsManager::setDockPosition(static_cast<DockPosition>(dockPositionCombo->currentData().toInt()));
+	SettingsManager::setDockPosition(selectedPosition());
 	SettingsManager::setStyle(workingStyle);
 	SettingsManager::save();
 	setDirty(false);
@@ -2099,9 +2064,11 @@ void OmniBarConfig::saveSettings()
 	}
 }
 
-QTreeWidgetItem *OmniBarConfig::createTreeItem(const std::shared_ptr<ButtonConfig> &config)
+void OmniBarConfig::updateTreeItem(QTreeWidgetItem *item, const std::shared_ptr<ButtonConfig> &config)
 {
-	QTreeWidgetItem *item = new QTreeWidgetItem();
+	if (!item || !config)
+		return;
+
 	item->setText(0, config->displayText());
 	item->setText(1, config->summaryText());
 	item->setIcon(0, omniBarIconForConfig(config, palette().color(QPalette::Text), 16));
@@ -2116,6 +2083,9 @@ QTreeWidgetItem *OmniBarConfig::createTreeItem(const std::shared_ptr<ButtonConfi
 					 .arg(config->summaryText()));
 		item->setForeground(1, QBrush(QColor(214, 138, 0)));
 		item->setToolTip(1, obs_module_text("OmniBar.Settings.MissingHint"));
+	} else {
+		item->setForeground(1, QBrush());
+		item->setToolTip(1, QString());
 	}
 
 	Qt::ItemFlags flags = Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled;
@@ -2123,7 +2093,12 @@ QTreeWidgetItem *OmniBarConfig::createTreeItem(const std::shared_ptr<ButtonConfi
 	if (config->isGroup)
 		flags |= Qt::ItemIsDropEnabled;
 	item->setFlags(flags);
+}
 
+QTreeWidgetItem *OmniBarConfig::createTreeItem(const std::shared_ptr<ButtonConfig> &config)
+{
+	QTreeWidgetItem *item = new QTreeWidgetItem();
+	updateTreeItem(item, config);
 	configRegistry.insert(config->id, config);
 	return item;
 }
@@ -2133,6 +2108,8 @@ void OmniBarConfig::populateButtonTree()
 	QString selectedId = buttonTree->currentItem() ? buttonTree->currentItem()->data(0, kConfigIdRole).toString()
 						       : QString();
 
+	// Rebuilding the rows must not swap the inspector out from under
+	// whatever is being typed into it.
 	QSignalBlocker blocker(buttonTree);
 	buttonTree->clear();
 	configRegistry.clear();
@@ -2200,8 +2177,9 @@ void OmniBarConfig::rebuildModelFromTree()
 		if (config->isGroup) {
 			config->children = children;
 		} else {
-			// Should not happen - only groups accept drops - but
-			// never drop buttons on the floor if it does.
+			// A group turned back into a plain button lets go of what
+			// was inside it: the buttons move out to sit after it,
+			// rather than being thrown away.
 			rebuilt.append(children);
 		}
 	}
@@ -2209,10 +2187,89 @@ void OmniBarConfig::rebuildModelFromTree()
 	workingButtons = rebuilt;
 }
 
+void OmniBarConfig::refreshBarPreview()
+{
+	barPreview->setEntries(workingButtons);
+	QTreeWidgetItem *current = buttonTree->currentItem();
+	barPreview->setSelectedId(current ? current->data(0, kConfigIdRole).toString() : QString());
+}
+
+void OmniBarConfig::onSelectionChanged()
+{
+	QTreeWidgetItem *item = buttonTree->currentItem();
+	auto config = configForItem(item);
+
+	// A row nested under a group cannot itself become a group, and neither
+	// can a piece of the bar.
+	bool allowGroup = item && !item->parent() && config && !config->isDecoration();
+	showInspector(config, allowGroup);
+
+	bool hasSelection = config != nullptr;
+	removeButton->setEnabled(hasSelection);
+	duplicateButton->setEnabled(hasSelection);
+	moveUpButton->setEnabled(hasSelection);
+	moveDownButton->setEnabled(hasSelection);
+
+	barPreview->setSelectedId(config ? config->id : QString());
+}
+
+void OmniBarConfig::showInspector(const std::shared_ptr<ButtonConfig> &config, bool allowGroup)
+{
+	if (QWidget *old = inspectorScroll->takeWidget())
+		old->deleteLater();
+	editor = nullptr;
+
+	QWidget *container = new QWidget();
+	QVBoxLayout *layout = new QVBoxLayout(container);
+	layout->setContentsMargins(14, 8, 14, 8);
+
+	if (!config) {
+		QLabel *empty = new QLabel(obs_module_text("OmniBar.Inspector.Empty"));
+		empty->setWordWrap(true);
+		empty->setAlignment(Qt::AlignCenter);
+		empty->setForegroundRole(QPalette::PlaceholderText);
+		layout->addStretch();
+		layout->addWidget(empty);
+		layout->addStretch();
+	} else {
+		editor = new ButtonEditor(config, workingStyle, allowGroup);
+		connect(editor, &ButtonEditor::changed, this, &OmniBarConfig::onEditorChanged);
+		layout->addWidget(editor);
+	}
+
+	inspectorScroll->setWidget(container);
+}
+
+void OmniBarConfig::onEditorChanged()
+{
+	if (!editor)
+		return;
+
+	auto config = editor->getButtonConfig();
+	QTreeWidgetItem *item = config ? itemForId(config->id) : nullptr;
+	if (!item)
+		return;
+
+	// Turning a button into a group, or back, changes what the row may hold,
+	// so the rows are rebuilt - which also moves the buttons out of a group
+	// that has stopped being one. Anything else is a change to one row.
+	bool wasGroup = item->data(0, kConfigIsGroupRole).toBool();
+	if (wasGroup != config->isGroup) {
+		rebuildModelFromTree();
+		populateButtonTree();
+	} else {
+		updateTreeItem(item, config);
+	}
+
+	refreshBarPreview();
+	markDirty();
+}
+
 void OmniBarConfig::onTreeReordered()
 {
 	rebuildModelFromTree();
 	populateButtonTree();
+	refreshBarPreview();
 	markDirty();
 }
 
@@ -2224,21 +2281,29 @@ void OmniBarConfig::addNewEntry(std::shared_ptr<ButtonConfig> config)
 	// child of it is selected.
 	QTreeWidgetItem *current = buttonTree->currentItem();
 	auto currentConfig = configForItem(current);
+	bool placed = false;
 
 	if (current && current->parent() && !config->isGroup && !config->isDecoration()) {
 		auto parentConfig = configForItem(current->parent());
 		if (parentConfig) {
 			int row = parentConfig->children.indexOf(currentConfig);
 			parentConfig->children.insert(row >= 0 ? row + 1 : parentConfig->children.size(), config);
-			populateButtonTree();
-			markDirty();
-			return;
+			placed = true;
 		}
 	}
 
-	int row = currentConfig ? workingButtons.indexOf(currentConfig) : -1;
-	workingButtons.insert(row >= 0 ? row + 1 : workingButtons.size(), config);
+	if (!placed) {
+		// A selected child stands for its group at the top level.
+		auto anchor = current && current->parent() ? configForItem(current->parent()) : currentConfig;
+		int row = anchor ? workingButtons.indexOf(anchor) : -1;
+		workingButtons.insert(row >= 0 ? row + 1 : workingButtons.size(), config);
+	}
+
 	populateButtonTree();
+	refreshBarPreview();
+	selectEntry(config->id);
+	if (editor)
+		editor->focusFirstField();
 	markDirty();
 }
 
@@ -2248,6 +2313,7 @@ void OmniBarConfig::onAddButton()
 	QAction *buttonAction = menu.addAction(obs_module_text("OmniBar.Settings.AddPlainButton"));
 	QAction *groupAction = menu.addAction(obs_module_text("OmniBar.Settings.AddGroup"));
 	QAction *displayAction = menu.addAction(obs_module_text("OmniBar.Settings.AddDisplay"));
+	menu.addSeparator();
 	QAction *spacerAction = menu.addAction(obs_module_text("OmniBar.Settings.AddSpacer"));
 	QAction *flexibleAction = menu.addAction(obs_module_text("OmniBar.Settings.AddFlexibleSpace"));
 	QAction *dividerAction = menu.addAction(obs_module_text("OmniBar.Settings.AddDivider"));
@@ -2258,58 +2324,31 @@ void OmniBarConfig::onAddButton()
 
 	auto config = std::make_shared<ButtonConfig>();
 
-	if (chosen == spacerAction || chosen == flexibleAction || chosen == dividerAction || chosen == displayAction) {
-		if (chosen == spacerAction || chosen == flexibleAction) {
-			config->action = std::make_unique<SpacerAction>(10, chosen == flexibleAction);
-		} else if (chosen == dividerAction) {
-			config->action = std::make_unique<DividerAction>();
-		} else {
-			config->action = std::make_unique<DisplayAction>(DisplayMetric::StreamTime);
-			// A number wants its own room, not an icon's square.
-			config->displayMode = ButtonDisplayMode::TextOnly;
-		}
-
-		ButtonEditDialog dialog(config, workingStyle, false, this);
-		if (dialog.exec() == QDialog::Accepted)
-			addNewEntry(config);
-		return;
-	}
-
-	if (chosen == groupAction) {
+	if (chosen == spacerAction || chosen == flexibleAction) {
+		config->action = std::make_unique<SpacerAction>(10, chosen == flexibleAction);
+	} else if (chosen == dividerAction) {
+		config->action = std::make_unique<DividerAction>();
+	} else if (chosen == displayAction) {
+		config->action = std::make_unique<DisplayAction>(DisplayMetric::StreamTime);
+		// A number wants its own room, not an icon's square.
+		config->displayMode = ButtonDisplayMode::TextOnly;
+	} else if (chosen == groupAction) {
 		config->isGroup = true;
 		config->action = std::make_unique<NoAction>();
 		config->label = obs_module_text("OmniBar.Settings.NewGroup");
 	} else if (chosen == buttonAction) {
 		config->action = std::make_unique<FrontendAction>(FrontendActionType::ToggleStreaming);
-		config->tooltip = obs_module_text("OmniBar.Action.ToggleStream");
-		config->iconPath = "stream.svg";
 	} else {
 		return;
 	}
 
-	ButtonEditDialog dialog(config, workingStyle, true, this);
-	if (dialog.exec() == QDialog::Accepted)
-		addNewEntry(config);
+	addNewEntry(config);
 }
 
 void OmniBarConfig::onEditButton()
 {
-	QTreeWidgetItem *item = buttonTree->currentItem();
-	auto config = configForItem(item);
-	if (!config)
-		return;
-
-	rebuildModelFromTree();
-
-	// A row nested under a group cannot itself become a group.
-	bool allowGroup = item->parent() == nullptr;
-
-	ButtonEditDialog dialog(config, workingStyle, allowGroup, this);
-	if (dialog.exec() != QDialog::Accepted)
-		return;
-
-	populateButtonTree();
-	markDirty();
+	if (editor)
+		editor->focusFirstField();
 }
 
 void OmniBarConfig::onDuplicateButton()
@@ -2342,6 +2381,15 @@ void OmniBarConfig::onRemoveButton()
 			return;
 	}
 
+	// Whatever sat below the removed row takes its place in the selection,
+	// so pressing Delete again keeps working down the list.
+	QTreeWidgetItem *next = buttonTree->itemBelow(item);
+	while (next && next->parent() == item)
+		next = buttonTree->itemBelow(next);
+	if (!next)
+		next = buttonTree->itemAbove(item);
+	QString nextId = next ? next->data(0, kConfigIdRole).toString() : QString();
+
 	rebuildModelFromTree();
 
 	if (item->parent()) {
@@ -2353,6 +2401,15 @@ void OmniBarConfig::onRemoveButton()
 	}
 
 	populateButtonTree();
+	if (QTreeWidgetItem *nextItem = itemForId(nextId)) {
+		QSignalBlocker blocker(buttonTree);
+		buttonTree->setCurrentItem(nextItem);
+	} else {
+		QSignalBlocker blocker(buttonTree);
+		buttonTree->setCurrentItem(nullptr);
+	}
+	onSelectionChanged();
+	refreshBarPreview();
 	markDirty();
 }
 
@@ -2380,6 +2437,7 @@ void OmniBarConfig::onMoveUp()
 	}
 
 	populateButtonTree();
+	refreshBarPreview();
 }
 
 void OmniBarConfig::onMoveDown()
@@ -2406,24 +2464,18 @@ void OmniBarConfig::onMoveDown()
 	}
 
 	populateButtonTree();
+	refreshBarPreview();
 }
 
-void OmniBarConfig::onItemDoubleClicked(QTreeWidgetItem *item, int column)
+void OmniBarConfig::onPresetChanged(int presetId)
 {
-	Q_UNUSED(item);
-	Q_UNUSED(column);
-	onEditButton();
-}
-
-void OmniBarConfig::onPresetChanged(int index)
-{
-	Q_UNUSED(index);
 	if (updatingStyleWidgets)
 		return;
 
-	auto preset = static_cast<StylePreset>(presetCombo->currentData().toInt());
+	auto preset = static_cast<StylePreset>(presetId);
 	if (preset == StylePreset::Custom) {
 		workingStyle.preset = StylePreset::Custom;
+		markDirty();
 		return;
 	}
 
@@ -2453,11 +2505,8 @@ void OmniBarConfig::onStyleValueChanged()
 	// Editing any value means this is no longer one of the named looks.
 	if (workingStyle != BarStyle::fromPreset(workingStyle.preset)) {
 		workingStyle.preset = StylePreset::Custom;
-		updatingStyleWidgets = true;
-		int index = presetCombo->findData(static_cast<int>(StylePreset::Custom));
-		if (index >= 0)
-			presetCombo->setCurrentIndex(index);
-		updatingStyleWidgets = false;
+		if (QToolButton *card = presetCards.value(static_cast<int>(StylePreset::Custom)))
+			card->setChecked(true);
 	}
 
 	refreshStylePreview();
@@ -2475,9 +2524,8 @@ void OmniBarConfig::updateStyleWidgets()
 {
 	updatingStyleWidgets = true;
 
-	int presetIndex = presetCombo->findData(static_cast<int>(workingStyle.preset));
-	if (presetIndex >= 0)
-		presetCombo->setCurrentIndex(presetIndex);
+	if (QToolButton *card = presetCards.value(static_cast<int>(workingStyle.preset)))
+		card->setChecked(true);
 
 	iconSizeSpin->setValue(workingStyle.iconSize);
 	spacingSpin->setValue(workingStyle.spacing);
@@ -2505,21 +2553,22 @@ void OmniBarConfig::updateStyleWidgets()
 
 void OmniBarConfig::refreshStylePreview()
 {
-	if (!stylePreviewBar)
+	if (!barPreview)
 		return;
 
-	stylePreviewBar->setStyleSheet(workingStyle.panelStyleSheet(QStringLiteral("OmniBarPreviewBackdrop")));
+	barPreview->setBarStyle(workingStyle);
 
-	QHBoxLayout *layout = qobject_cast<QHBoxLayout *>(stylePreviewBar->layout());
-	if (layout)
-		layout->setSpacing(workingStyle.spacing);
+	// The Custom card shows the style being built.
+	if (QToolButton *card = presetCards.value(static_cast<int>(StylePreset::Custom))) {
+		QPixmap sample = renderStyleSample(workingStyle);
+		card->setIcon(QIcon(sample));
+		card->setIconSize(sample.size() / sample.devicePixelRatio());
+	}
 
-	// The samples keep the checked state they were built with: these buttons
-	// stand for the style, not for what OBS happens to be doing.
-	for (auto *button : stylePreviewButtons)
-		button->applyStyle(workingStyle);
-	for (auto *display : stylePreviewBar->findChildren<OmniBarDisplay *>())
-		display->applyStyle(workingStyle);
+	// The inspector draws its icon previews in the style too.
+	QTreeWidgetItem *current = buttonTree ? buttonTree->currentItem() : nullptr;
+	if (editor && current)
+		onSelectionChanged();
 }
 
 void OmniBarConfig::onApply()
@@ -2536,4 +2585,9 @@ void OmniBarConfig::onOk()
 void OmniBarConfig::onCancel()
 {
 	reject();
+}
+
+void OmniBarConfig::onRevert()
+{
+	loadSettings();
 }
