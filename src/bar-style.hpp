@@ -24,8 +24,54 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 // Named looks the user can pick from. Selecting a preset fills every value in
 // BarStyle with that preset's numbers; editing any value afterwards switches
-// the stored preset to Custom so the choice is not silently overwritten.
-enum class StylePreset { ObsNative = 0, Compact = 1, ModernRounded = 2, NeonAccent = 3, Custom = 4 };
+// the stored preset to Custom so the choice is not silently overwritten. The
+// presets are stored by name, but the numbers are kept stable all the same.
+enum class StylePreset {
+	ObsNative = 0,
+	Compact = 1,
+	ModernRounded = 2,
+	NeonAccent = 3,
+	Custom = 4,
+	Broadcast = 5,
+	Capsule = 6,
+	MonoLine = 7,
+	HighContrast = 8,
+	Phosphor = 9,
+	Daylight = 10
+};
+
+// How a button shows that it is active. Fill paints the whole button in the
+// active colour; the others leave the button's resting look alone and mark it
+// with a line along the edge facing the window, a dot in the corner or a ring,
+// tinting the icon to match. Stored as numbers, so existing values must keep
+// theirs.
+enum class ActiveIndicator { Fill = 0, Underline = 1, Dot = 2, Ring = 3 };
+
+// What a button or readout is reporting on, which decides the colour it lights
+// up in when state colours are on.
+enum class BarState { None, Live, Recording, Paused, Replay, VirtualCam, Studio };
+
+// What OBS is doing, as one value: either read from OBS right now, or made up
+// by the settings dialog so the bar can be previewed as it would look live.
+struct ObsStateSnapshot {
+	bool streaming = false;
+	bool recording = false;
+	bool recordingPaused = false;
+	bool replayBuffer = false;
+	bool virtualCam = false;
+	bool studioMode = false;
+
+	static ObsStateSnapshot current();
+
+	// Whether the thing a state colour stands for is running.
+	bool isActive(BarState state) const;
+
+	bool operator==(const ObsStateSnapshot &other) const;
+	bool operator!=(const ObsStateSnapshot &other) const { return !(*this == other); }
+};
+
+// How urgently a readout wants looking at.
+enum class Severity { Normal, Warning, Critical };
 
 struct BarStyle {
 	StylePreset preset = StylePreset::ObsNative;
@@ -43,6 +89,8 @@ struct BarStyle {
 	int pulsePeriod = 1400;
 	int pulseIntensity = 60;
 
+	ActiveIndicator indicator = ActiveIndicator::Fill;
+
 	// When false the colours below are ignored at render time and derived
 	// from the running OBS palette instead, so the bar tracks theme changes.
 	bool useCustomColors = false;
@@ -53,6 +101,23 @@ struct BarStyle {
 	QColor buttonChecked;
 	QColor buttonBorder;
 	QColor textColor;
+
+	// Each output lights up in its own colour, so a live stream and a running
+	// replay buffer never look alike. These are meanings rather than theme
+	// colours, so they apply whether or not the bar follows the OBS theme.
+	// When off, everything active uses buttonChecked as it always did.
+	bool useStateColors = true;
+	QColor stateLive;
+	QColor stateRecording;
+	QColor statePaused;
+	QColor stateReplay;
+	QColor stateVirtualCam;
+	QColor stateStudio;
+
+	// Readouts that have crossed a threshold - dropped frames climbing, the
+	// recording drive filling up - are drawn in these.
+	QColor warningColor;
+	QColor criticalColor;
 
 	static BarStyle fromPreset(StylePreset preset);
 	static QString presetName(StylePreset preset);
@@ -66,24 +131,29 @@ struct BarStyle {
 	QColor effectiveButtonBorder() const;
 	QColor effectiveTextColor() const;
 
+	// Colour something reporting on state lights up in: its state colour when
+	// those are on and it has one, the shared active colour otherwise.
+	QColor stateColor(BarState state) const;
+	QColor severityColor(Severity severity) const;
+
+	// Corner radius a button of the given size can actually take: a radius
+	// larger than half the button would bend its edges inside out.
+	int effectiveCornerRadius(int width, int height) const;
+
 	// Stylesheet for the toolbar itself, including the rules that style every
 	// button inside it.
 	QString barStyleSheet() const;
 
-	// Stylesheet for a single button that overrides the shared accent with
-	// its own colour. Applied on the button widget, which outranks the
-	// toolbar's sheet for the same properties.
+	// Stylesheet for a single button that overrides the shared hover colour
+	// with a tint of its own accent. Applied on the button widget, which
+	// outranks the toolbar's sheet for the same properties. The active state
+	// itself is painted by the button.
 	QString buttonAccentStyleSheet(const QColor &accent) const;
 
-	// Stylesheet for a readout given a colour of its own. A readout has no
-	// hover or active state to recolour, so the colour goes on the text -
-	// which is the whole of what it draws.
-	QString displayAccentStyleSheet(const QColor &accent) const;
-
-	// Stylesheet for a single button whose active fill is mid-breath. accent
-	// is the colour that button uses when active - the shared one, or its own
-	// override - and factor scales how much of it is showing, 0 to 1.
-	QString buttonPulseStyleSheet(const QColor &accent, qreal factor) const;
+	// Stylesheet for a readout. A readout has no hover or active state, so
+	// every state looks like the resting one and the colour goes on the text,
+	// which is the whole of what it draws. An invalid colour keeps the bar's.
+	QString displayStyleSheet(const QColor &text) const;
 
 	// Stylesheet for a panel that renders buttons on an opaque backdrop: a
 	// group's flyout, and the settings dialog's previews.
@@ -102,6 +172,9 @@ struct BarStyle {
 
 // True when OBS is currently running a dark theme.
 bool omniBarIsDarkTheme();
+
+// Black or white, whichever reads better on top of fill.
+QColor omniBarContrastingColor(const QColor &fill);
 
 // How much of the active colour a pulsing button should be showing right now,
 // from 1 at the top of the breath down to 1 - intensity at the bottom. Driven

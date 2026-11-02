@@ -31,7 +31,22 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 // Forward declaration
 class ButtonConfig;
 
-enum class ActionType { None, Frontend, SourceHotkey, SourceFilter, SourceVisibility, Spacer, Divider, Display };
+// Stored by name in the configuration file, so the numbers are free to move.
+enum class ActionType {
+	None,
+	Frontend,
+	SourceHotkey,
+	SourceFilter,
+	SourceVisibility,
+	Spacer,
+	Divider,
+	Display,
+	Scene,
+	AudioMute
+};
+
+// What a mute button does each time it is pressed. Stored as numbers.
+enum class MuteMode { Toggle = 0, Mute = 1, Unmute = 2 };
 
 enum class FrontendActionType {
 	StartStreaming,
@@ -56,9 +71,32 @@ enum class FrontendActionType {
 	TransitionToProgram
 };
 
+// Everything about one frontend action that is not behaviour: the name it is
+// stored under, the name shown, its default icon, what it reports on, and the
+// family it belongs to. Actions that start, stop or toggle the same thing share
+// a family, which the action picker shows as one entry with a choice of
+// variant. One table holds all of them, so adding an action is one line there
+// plus its behaviour.
+struct FrontendActionInfo {
+	FrontendActionType type;
+	// Written to the configuration file, so it must never change.
+	const char *id;
+	const char *labelKey;
+	const char *icon;
+	const char *family;
+	// Short name of the variant within the family: Toggle, Start, Stop...
+	const char *variantKey;
+	BarState state;
+};
+
 // Where a button's label sits relative to its icon. The numbers are written to
 // the configuration file, so existing ones must keep their values.
 enum class ButtonDisplayMode { IconOnly = 0, TextOnly = 1, TextRight = 2, TextBelow = 3, TextLeft = 4, TextAbove = 5 };
+
+// Whether a button asks before it runs. FollowObs asks exactly when OBS's own
+// controls would - stopping the stream, for instance, if "confirm before
+// stopping" is on in the OBS settings. Stored as numbers.
+enum class ConfirmMode { FollowObs = 0, Always = 1, Never = 2 };
 
 // How a group presents its children.
 enum class GroupDisplayMode { Flyout = 0, Inline = 1 };
@@ -92,8 +130,9 @@ struct ActivationCondition {
 	bool isSet() const { return source != ConditionSource::Always; }
 
 	// An unset condition always holds. action supplies the OwnAction source
-	// and may be null.
-	bool isSatisfied(const ButtonAction *action) const;
+	// and may be null. With a simulated state the test is made against that
+	// instead of what OBS is doing, for the settings dialog's preview.
+	bool isSatisfied(const ButtonAction *action, const ObsStateSnapshot *simulated = nullptr) const;
 
 	// Short phrase for the settings list.
 	QString describe() const;
@@ -112,6 +151,21 @@ public:
 	virtual QString getDisplayName() const = 0;
 	virtual obs_data_t *serialize() const = 0;
 	static std::unique_ptr<ButtonAction> deserialize(obs_data_t *data);
+
+	// What this action reports on, which picks the colour it lights up in.
+	virtual BarState barState() const { return BarState::None; }
+
+	// Whether the action would show as active in a simulated state. Actions
+	// that report on OBS's outputs answer from the state; the rest, such as a
+	// filter, have nothing simulated to go on and say what is true now.
+	virtual bool isActiveIn(const ObsStateSnapshot &state) const;
+
+	// True when OBS's own controls would ask before doing what this is about
+	// to do, given what is running right now.
+	virtual bool obsWouldConfirm() const { return false; }
+
+	// Question put to the user before running, when one is asked.
+	virtual QString confirmationQuestion() const;
 };
 
 // Placeholder for a button that does nothing on its own, used by groups that
@@ -133,6 +187,9 @@ public:
 	bool isActive() const override;
 	QString getDisplayName() const override;
 	obs_data_t *serialize() const override;
+	BarState barState() const override;
+	bool obsWouldConfirm() const override;
+	QString confirmationQuestion() const override;
 
 	FrontendActionType getActionType() const { return actionType; }
 	void setActionType(FrontendActionType type) { actionType = type; }
@@ -143,6 +200,11 @@ public:
 
 	// Translated name shown to the user.
 	static QString getFrontendActionLabel(FrontendActionType type);
+
+	static const FrontendActionInfo &info(FrontendActionType type);
+	static const QList<FrontendActionInfo> &all();
+	// The members of a family, in the order the picker offers them.
+	static QList<FrontendActionType> familyMembers(const QString &family);
 
 private:
 	FrontendActionType actionType;
@@ -200,6 +262,9 @@ private:
 	QString filterName;
 };
 
+// Shows or hides a source in a scene. An empty scene name means whichever scene
+// is on air at the moment of pressing, so one button can serve a webcam that
+// appears in several scenes.
 class SourceVisibilityAction : public ButtonAction {
 public:
 	SourceVisibilityAction(const QString &scene, const QString &source);
@@ -216,14 +281,69 @@ public:
 	void setSceneName(const QString &name) { sceneName = name; }
 	void setSourceName(const QString &name) { sourceName = name; }
 
+	bool followsCurrentScene() const { return sceneName.isEmpty(); }
+
+	// True when the source no longer exists at all. For a button that
+	// follows the current scene, the source being absent from the scene on
+	// air is expected rather than a fault.
+	bool sourceMissing() const;
+
 private:
+	// The scene the action works on, with a reference the caller releases.
+	obs_source_t *targetScene() const;
+
 	QString sceneName;
 	QString sourceName;
 };
 
+// Switches the scene on air, as clicking it in the Scenes dock does: in studio
+// mode it goes to the preview, ready to transition.
+class SceneAction : public ButtonAction {
+public:
+	explicit SceneAction(const QString &scene);
+
+	ActionType getType() const override { return ActionType::Scene; }
+	void execute() override;
+	// Lit while the scene is the one on air.
+	bool isActive() const override;
+	bool isValid() const override;
+	QString getDisplayName() const override;
+	obs_data_t *serialize() const override;
+
+	QString getSceneName() const { return sceneName; }
+	void setSceneName(const QString &name) { sceneName = name; }
+
+private:
+	QString sceneName;
+};
+
+// Mutes or unmutes an audio source - a microphone, desktop audio, a media
+// source with sound.
+class AudioMuteAction : public ButtonAction {
+public:
+	AudioMuteAction(const QString &source, MuteMode mode = MuteMode::Toggle);
+
+	ActionType getType() const override { return ActionType::AudioMute; }
+	void execute() override;
+	// Lit while the source is muted, the way the OBS mixer marks it.
+	bool isActive() const override;
+	bool isValid() const override;
+	QString getDisplayName() const override;
+	obs_data_t *serialize() const override;
+
+	QString getSourceName() const { return sourceName; }
+	void setSourceName(const QString &name) { sourceName = name; }
+	MuteMode getMode() const { return mode; }
+	void setMode(MuteMode value) { mode = value; }
+
+private:
+	QString sourceName;
+	MuteMode mode;
+};
+
 class SpacerAction : public ButtonAction {
 public:
-	SpacerAction(int width = 10);
+	SpacerAction(int width = 10, bool expanding = false);
 
 	ActionType getType() const override { return ActionType::Spacer; }
 	void execute() override {}
@@ -233,8 +353,14 @@ public:
 	int getWidth() const { return spacerWidth; }
 	void setWidth(int w) { spacerWidth = w; }
 
+	// A flexible space takes whatever length the bar has left over, pushing
+	// everything after it to the far end. Its width is then only a minimum.
+	bool isExpanding() const { return expanding; }
+	void setExpanding(bool value) { expanding = value; }
+
 private:
 	int spacerWidth;
+	bool expanding;
 };
 
 // A line drawn across the bar to visually separate neighbouring buttons.
@@ -287,6 +413,7 @@ public:
 	// Reports whether the metric has anything live behind it, which is what
 	// makes "only while this entry's own value is live" a usable condition.
 	bool isActive() const override;
+	bool isActiveIn(const ObsStateSnapshot &state) const override;
 	QString getDisplayName() const override;
 	obs_data_t *serialize() const override;
 
@@ -304,6 +431,11 @@ public:
 	int getMinimumWidth() const { return minimumWidth; }
 	void setMinimumWidth(int value) { minimumWidth = value; }
 
+	// Draw the value in the bar's warning or critical colour once it crosses
+	// its threshold. Only means anything for metrics that have one.
+	bool getWarnColors() const { return warnColors; }
+	void setWarnColors(bool value) { warnColors = value; }
+
 	// Reading as it stands right now, formatted for the bar.
 	QString currentValue() const;
 
@@ -311,6 +443,7 @@ private:
 	DisplayMetric metric;
 	int minimumWidth;
 	ClockFormat clockFormat = ClockFormat::Hours24;
+	bool warnColors = true;
 };
 
 // Button configuration class
@@ -343,6 +476,9 @@ public:
 	// speed and depth of the breath are part of the bar's style.
 	bool pulseWhenActive = false;
 
+	// Whether pressing the button asks first.
+	ConfirmMode confirmMode = ConfirmMode::FollowObs;
+
 	// Group settings. Children are limited to one level deep: a child is
 	// never itself a group.
 	bool isGroup = false;
@@ -369,6 +505,17 @@ public:
 	// True when the button runs something of its own, as opposed to a group
 	// that only opens and closes.
 	bool hasAction() const;
+
+	// True when pressing the button right now should ask before running.
+	bool needsConfirmation() const;
+
+	// The colour the button lights up in while active: its own override, or
+	// the style's colour for what its action reports on.
+	QColor activeColor(const BarStyle &style) const;
+
+	// True when the button points at a source, filter or hotkey that cannot
+	// currently be found.
+	bool targetMissing() const;
 
 	// Text shown for this button in the settings tree.
 	QString displayText() const;

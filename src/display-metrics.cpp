@@ -24,6 +24,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <util/platform.h>
 #include <media-io/video-io.h>
 
+#include <QStringList>
 #include <QTime>
 
 namespace {
@@ -49,27 +50,26 @@ struct OutputRate {
 };
 
 struct MetricState {
-	// When each feature started running, or 0 while it is not. Taken from
-	// the sampler's own clock rather than from frontend events, so a bar
-	// built while something is already running still counts from somewhere.
+	// When each feature started running, or 0 while it is not. Set from the
+	// frontend events as they happen, so the timers agree with OBS's own;
+	// the sampler only fills in for something that was already running
+	// before the plugin could hear about it.
 	uint64_t streamStart = 0;
 	uint64_t recordStart = 0;
-	uint64_t recordPaused = 0;
 	uint64_t replayStart = 0;
 	uint64_t virtualCamStart = 0;
 	uint64_t lastReplaySaved = 0;
 
-	uint64_t lastSample = 0;
+	// Time the recording has spent paused: whole pauses already over, and
+	// the start of the one in progress, if any.
+	uint64_t recordPausedTotal = 0;
+	uint64_t recordPausedSince = 0;
+
 	uint64_t lastRateSample = 0;
 
 	OutputRate stream;
 	OutputRate record;
 	uint64_t recordBytes = 0;
-
-	// The replay buffer says nothing when it saves, but the path of the last
-	// replay changes, which amounts to the same thing.
-	QString lastReplayPath;
-	bool replayPathKnown = false;
 
 	os_cpu_usage_info_t *cpu = nullptr;
 	double cpuUsage = 0.0;
@@ -80,7 +80,7 @@ struct MetricState {
 	bool started = false;
 };
 
-MetricState state;
+MetricState metricState;
 
 QString translated(const char *key)
 {
@@ -190,14 +190,6 @@ QString recordingDirectory()
 	return result;
 }
 
-QString lastReplayPath()
-{
-	char *path = obs_frontend_get_last_replay();
-	QString result = path ? QString::fromUtf8(path) : QString();
-	bfree(path);
-	return result;
-}
-
 struct MetricNames {
 	DisplayMetric metric;
 	const char *id;
@@ -221,7 +213,8 @@ const MetricNames kMetricNames[] = {
 	{DisplayMetric::RenderLag, "render_lag", "OmniBar.Metric.RenderLag"},
 	{DisplayMetric::EncodingLag, "encoding_lag", "OmniBar.Metric.EncodingLag"},
 	{DisplayMetric::Memory, "memory", "OmniBar.Metric.Memory"},
-	{DisplayMetric::Clock, "clock", "OmniBar.Metric.Clock"}};
+	{DisplayMetric::Clock, "clock", "OmniBar.Metric.Clock"},
+	{DisplayMetric::Status, "status", "OmniBar.Metric.Status"}};
 
 // Both formats carry seconds, matching the run timers beside them on the bar,
 // and the 12-hour one carries a suffix so morning and afternoon cannot be
@@ -232,15 +225,117 @@ QString formatClock(ClockFormat format)
 									    : QStringLiteral("HH:mm:ss"));
 }
 
+uint64_t recordingElapsed(uint64_t now)
+{
+	if (!metricState.recordStart)
+		return 0;
+	uint64_t elapsed = now > metricState.recordStart ? now - metricState.recordStart : 0;
+	uint64_t paused = metricState.recordPausedTotal;
+	if (metricState.recordPausedSince && now > metricState.recordPausedSince)
+		paused += now - metricState.recordPausedSince;
+	return elapsed > paused ? elapsed - paused : 0;
+}
+
+double percentOf(uint64_t part, uint64_t total)
+{
+	return total ? (static_cast<double>(part) / static_cast<double>(total)) * 100.0 : 0.0;
+}
+
+// Share of frames lost for the metrics that count them, or a negative value
+// when there is nothing to count.
+double lossPercent(DisplayMetric metric)
+{
+	switch (metric) {
+	case DisplayMetric::StreamDropped: {
+		obs_output_t *output = streamingOutput();
+		if (!output)
+			return -1.0;
+		int dropped = obs_output_get_frames_dropped(output);
+		int total = obs_output_get_total_frames(output);
+		obs_output_release(output);
+		return percentOf(dropped > 0 ? static_cast<uint64_t>(dropped) : 0,
+				 total > 0 ? static_cast<uint64_t>(total) : 0);
+	}
+	case DisplayMetric::RenderLag:
+		return percentOf(obs_get_lagged_frames(), obs_get_total_frames());
+	case DisplayMetric::EncodingLag: {
+		video_t *video = obs_get_video();
+		if (!video)
+			return -1.0;
+		return percentOf(video_output_get_skipped_frames(video), video_output_get_total_frames(video));
+	}
+	default:
+		return -1.0;
+	}
+}
+
+void onFrontendEvent(enum obs_frontend_event event, void *)
+{
+	uint64_t now = os_gettime_ns();
+
+	switch (event) {
+	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
+		metricState.streamStart = now;
+		break;
+	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
+		metricState.streamStart = 0;
+		metricState.stream.reset();
+		break;
+	case OBS_FRONTEND_EVENT_RECORDING_STARTED:
+		metricState.recordStart = now;
+		metricState.recordPausedTotal = 0;
+		metricState.recordPausedSince = 0;
+		break;
+	case OBS_FRONTEND_EVENT_RECORDING_STOPPED:
+		metricState.recordStart = 0;
+		metricState.recordPausedTotal = 0;
+		metricState.recordPausedSince = 0;
+		metricState.record.reset();
+		metricState.recordBytes = 0;
+		break;
+	case OBS_FRONTEND_EVENT_RECORDING_PAUSED:
+		if (!metricState.recordPausedSince)
+			metricState.recordPausedSince = now;
+		break;
+	case OBS_FRONTEND_EVENT_RECORDING_UNPAUSED:
+		if (metricState.recordPausedSince) {
+			metricState.recordPausedTotal +=
+				now > metricState.recordPausedSince ? now - metricState.recordPausedSince : 0;
+			metricState.recordPausedSince = 0;
+		}
+		break;
+	case OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTED:
+		metricState.replayStart = now;
+		metricState.lastReplaySaved = 0;
+		break;
+	case OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED:
+		metricState.replayStart = 0;
+		metricState.lastReplaySaved = 0;
+		break;
+	case OBS_FRONTEND_EVENT_REPLAY_BUFFER_SAVED:
+		metricState.lastReplaySaved = now;
+		break;
+	case OBS_FRONTEND_EVENT_VIRTUALCAM_STARTED:
+		metricState.virtualCamStart = now;
+		break;
+	case OBS_FRONTEND_EVENT_VIRTUALCAM_STOPPED:
+		metricState.virtualCamStart = 0;
+		break;
+	default:
+		break;
+	}
+}
+
 } // namespace
 
 void OmniBarMetrics::start()
 {
-	if (state.started)
+	if (metricState.started)
 		return;
 
-	state.cpu = os_cpu_usage_info_start();
-	state.started = true;
+	metricState.cpu = os_cpu_usage_info_start();
+	metricState.started = true;
+	obs_frontend_add_event_callback(onFrontendEvent, nullptr);
 
 	// A first reading, so a bar built straight afterwards has something to
 	// show rather than a row of placeholders.
@@ -249,88 +344,79 @@ void OmniBarMetrics::start()
 
 void OmniBarMetrics::stop()
 {
-	if (state.cpu) {
-		os_cpu_usage_info_destroy(state.cpu);
-		state.cpu = nullptr;
+	if (metricState.started)
+		obs_frontend_remove_event_callback(onFrontendEvent, nullptr);
+	if (metricState.cpu) {
+		os_cpu_usage_info_destroy(metricState.cpu);
+		metricState.cpu = nullptr;
 	}
-	state = MetricState();
+	metricState = MetricState();
 }
 
 void OmniBarMetrics::sample()
 {
 	uint64_t now = os_gettime_ns();
-	uint64_t elapsed = state.lastSample && now > state.lastSample ? now - state.lastSample : 0;
-	state.lastSample = now;
 
-	// Run times. Each one starts counting from the first sample that finds
-	// its output running and is forgotten as soon as it stops.
-	auto track = [now](bool active, uint64_t &start) {
+	// The events above keep the timers exact. This only catches what they
+	// cannot: an output already running when the plugin loaded, or one that
+	// stopped without its event reaching us.
+	auto reconcile = [now](bool active, uint64_t &start) {
 		if (!active)
 			start = 0;
 		else if (!start)
 			start = now;
 	};
 
-	track(obs_frontend_streaming_active(), state.streamStart);
-	track(obs_frontend_replay_buffer_active(), state.replayStart);
-	track(obs_frontend_virtualcam_active(), state.virtualCamStart);
+	reconcile(obs_frontend_streaming_active(), metricState.streamStart);
+	reconcile(obs_frontend_replay_buffer_active(), metricState.replayStart);
+	reconcile(obs_frontend_virtualcam_active(), metricState.virtualCamStart);
 
 	if (obs_frontend_recording_active()) {
-		if (!state.recordStart) {
-			state.recordStart = now;
-			state.recordPaused = 0;
+		if (!metricState.recordStart)
+			metricState.recordStart = now;
+		bool paused = obs_frontend_recording_paused();
+		if (paused && !metricState.recordPausedSince)
+			metricState.recordPausedSince = now;
+		else if (!paused && metricState.recordPausedSince) {
+			metricState.recordPausedTotal +=
+				now > metricState.recordPausedSince ? now - metricState.recordPausedSince : 0;
+			metricState.recordPausedSince = 0;
 		}
-		// Paused time is held back rather than subtracted at the end, so
-		// the readout stands still while the recording does.
-		if (obs_frontend_recording_paused())
-			state.recordPaused += elapsed;
 	} else {
-		state.recordStart = 0;
-		state.recordPaused = 0;
+		metricState.recordStart = 0;
+		metricState.recordPausedTotal = 0;
+		metricState.recordPausedSince = 0;
 	}
 
-	if (state.replayStart) {
-		QString path = lastReplayPath();
-		if (!state.replayPathKnown) {
-			// Whatever is there at startup belongs to an earlier
-			// session, so it does not count as a save.
-			state.lastReplayPath = path;
-			state.replayPathKnown = true;
-		} else if (path != state.lastReplayPath) {
-			state.lastReplayPath = path;
-			state.lastReplaySaved = now;
-		}
-	} else {
-		state.replayPathKnown = false;
-		state.lastReplaySaved = 0;
-	}
+	if (!metricState.replayStart)
+		metricState.lastReplaySaved = 0;
 
 	obs_output_t *stream = streamingOutput();
-	sampleRate(stream, state.stream, now);
+	sampleRate(stream, metricState.stream, now);
 	if (stream)
 		obs_output_release(stream);
 
 	obs_output_t *record = recordingOutput();
-	sampleRate(record, state.record, now);
-	state.recordBytes = record ? obs_output_get_total_bytes(record) : 0;
+	sampleRate(record, metricState.record, now);
+	metricState.recordBytes = record ? obs_output_get_total_bytes(record) : 0;
 	if (record)
 		obs_output_release(record);
 
 	// The rest is measured against the clock rather than read outright, so
 	// it is only worth redoing about once a second.
-	if (state.lastRateSample && now - state.lastRateSample < kRateIntervalNs)
+	if (metricState.lastRateSample && now - metricState.lastRateSample < kRateIntervalNs)
 		return;
-	state.lastRateSample = now;
+	metricState.lastRateSample = now;
 
-	if (state.cpu)
-		state.cpuUsage = os_cpu_usage_info_query(state.cpu);
+	if (metricState.cpu)
+		metricState.cpuUsage = os_cpu_usage_info_query(metricState.cpu);
 
 	QString directory = recordingDirectory();
 	if (directory.isEmpty()) {
-		state.diskKnown = false;
+		metricState.diskKnown = false;
 	} else {
-		state.diskFree = os_get_free_disk_space(directory.toUtf8().constData());
-		state.diskKnown = true;
+		metricState.diskFree = os_get_free_disk_space(directory.toUtf8().constData());
+		metricState.diskKnown = true;
 	}
 }
 
@@ -338,10 +424,10 @@ QString OmniBarMetrics::value(DisplayMetric metric, ClockFormat clockFormat)
 {
 	switch (metric) {
 	case DisplayMetric::StreamTime:
-		return sinceOrPlaceholder(state.streamStart);
+		return sinceOrPlaceholder(metricState.streamStart);
 
 	case DisplayMetric::StreamBitrate:
-		return state.streamStart ? formatKbps(state.stream.kbps) : QString::fromUtf8(kNoValue);
+		return metricState.streamStart ? formatKbps(metricState.stream.kbps) : QString::fromUtf8(kNoValue);
 
 	case DisplayMetric::StreamDropped: {
 		obs_output_t *output = streamingOutput();
@@ -354,34 +440,31 @@ QString OmniBarMetrics::value(DisplayMetric metric, ClockFormat clockFormat)
 				       total > 0 ? static_cast<uint64_t>(total) : 0);
 	}
 
-	case DisplayMetric::RecordTime: {
-		if (!state.recordStart)
+	case DisplayMetric::RecordTime:
+		if (!metricState.recordStart)
 			return QString::fromUtf8(kNoDuration);
-		uint64_t now = os_gettime_ns();
-		uint64_t elapsed = now > state.recordStart ? now - state.recordStart : 0;
-		return formatDuration(elapsed > state.recordPaused ? elapsed - state.recordPaused : 0);
-	}
+		return formatDuration(recordingElapsed(os_gettime_ns()));
 
 	case DisplayMetric::RecordBitrate:
-		return state.recordStart ? formatKbps(state.record.kbps) : QString::fromUtf8(kNoValue);
+		return metricState.recordStart ? formatKbps(metricState.record.kbps) : QString::fromUtf8(kNoValue);
 
 	case DisplayMetric::RecordSize:
-		return state.recordStart ? formatBytes(state.recordBytes) : QString::fromUtf8(kNoValue);
+		return metricState.recordStart ? formatBytes(metricState.recordBytes) : QString::fromUtf8(kNoValue);
 
 	case DisplayMetric::DiskFree:
-		return state.diskKnown ? formatBytes(state.diskFree) : QString::fromUtf8(kNoValue);
+		return metricState.diskKnown ? formatBytes(metricState.diskFree) : QString::fromUtf8(kNoValue);
 
 	case DisplayMetric::ReplayTime:
-		return sinceOrPlaceholder(state.replayStart);
+		return sinceOrPlaceholder(metricState.replayStart);
 
 	case DisplayMetric::ReplayLastSaved:
-		return sinceOrPlaceholder(state.lastReplaySaved);
+		return sinceOrPlaceholder(metricState.lastReplaySaved);
 
 	case DisplayMetric::VirtualCamTime:
-		return sinceOrPlaceholder(state.virtualCamStart);
+		return sinceOrPlaceholder(metricState.virtualCamStart);
 
 	case DisplayMetric::CpuUsage:
-		return QString("%1%").arg(state.cpuUsage, 0, 'f', 1);
+		return QString("%1%").arg(metricState.cpuUsage, 0, 'f', 1);
 
 	case DisplayMetric::Fps:
 		return QString("%1 fps").arg(obs_get_active_fps(), 0, 'f', 1);
@@ -405,13 +488,53 @@ QString OmniBarMetrics::value(DisplayMetric metric, ClockFormat clockFormat)
 
 	case DisplayMetric::Clock:
 		return formatClock(clockFormat);
+
+	case DisplayMetric::Status: {
+		uint64_t now = os_gettime_ns();
+		QStringList parts;
+		if (metricState.streamStart)
+			parts << translated("OmniBar.Status.Live").arg(formatDuration(now - metricState.streamStart));
+		if (metricState.recordStart)
+			parts << translated(metricState.recordPausedSince ? "OmniBar.Status.Paused"
+									  : "OmniBar.Status.Recording")
+					 .arg(formatDuration(recordingElapsed(now)));
+		if (parts.isEmpty())
+			return translated("OmniBar.Status.OffAir");
+		return parts.join(QStringLiteral(" \u00b7 "));
+	}
 	}
 
 	return QString::fromUtf8(kNoValue);
 }
 
-QString OmniBarMetrics::previewValue(DisplayMetric metric, ClockFormat clockFormat)
+QString OmniBarMetrics::previewValue(DisplayMetric metric, ClockFormat clockFormat, const ObsStateSnapshot *simulated)
 {
+	if (simulated && metric == DisplayMetric::Status) {
+		QStringList parts;
+		if (simulated->streaming)
+			parts << translated("OmniBar.Status.Live").arg(QStringLiteral("01:23:45"));
+		if (simulated->recording)
+			parts << translated(simulated->recordingPaused ? "OmniBar.Status.Paused"
+								       : "OmniBar.Status.Recording")
+					 .arg(QStringLiteral("00:41:07"));
+		return parts.isEmpty() ? translated("OmniBar.Status.OffAir") : parts.join(QStringLiteral(" \u00b7 "));
+	}
+
+	// Something not running in the simulated state reads as it would on the
+	// bar: a placeholder rather than a number.
+	if (simulated && !isLiveIn(metric, *simulated)) {
+		switch (metric) {
+		case DisplayMetric::StreamTime:
+		case DisplayMetric::RecordTime:
+		case DisplayMetric::ReplayTime:
+		case DisplayMetric::ReplayLastSaved:
+		case DisplayMetric::VirtualCamTime:
+			return QString::fromUtf8(kNoDuration);
+		default:
+			return QString::fromUtf8(kNoValue);
+		}
+	}
+
 	switch (metric) {
 	case DisplayMetric::StreamTime:
 	case DisplayMetric::RecordTime:
@@ -441,6 +564,9 @@ QString OmniBarMetrics::previewValue(DisplayMetric metric, ClockFormat clockForm
 		return formatBytes(1503238553ULL);
 	case DisplayMetric::Clock:
 		return formatClock(clockFormat);
+	case DisplayMetric::Status:
+		return translated("OmniBar.Status.Live").arg(QStringLiteral("01:23:45")) + QStringLiteral(" \u00b7 ") +
+		       translated("OmniBar.Status.Recording").arg(QStringLiteral("00:41:07"));
 	}
 
 	return QString::fromUtf8(kNoValue);
@@ -466,6 +592,9 @@ bool OmniBarMetrics::isLive(DisplayMetric metric)
 	case DisplayMetric::VirtualCamTime:
 		return obs_frontend_virtualcam_active();
 
+	case DisplayMetric::Status:
+		return obs_frontend_streaming_active() || obs_frontend_recording_active();
+
 	case DisplayMetric::DiskFree:
 	case DisplayMetric::CpuUsage:
 	case DisplayMetric::Fps:
@@ -480,6 +609,111 @@ bool OmniBarMetrics::isLive(DisplayMetric metric)
 	}
 
 	return false;
+}
+
+bool OmniBarMetrics::hasThresholds(DisplayMetric metric)
+{
+	switch (metric) {
+	case DisplayMetric::StreamDropped:
+	case DisplayMetric::RenderLag:
+	case DisplayMetric::EncodingLag:
+	case DisplayMetric::CpuUsage:
+	case DisplayMetric::DiskFree:
+	case DisplayMetric::Fps:
+		return true;
+	default:
+		return false;
+	}
+}
+
+Severity OmniBarMetrics::severity(DisplayMetric metric)
+{
+	// Fixed thresholds, chosen to match when OBS itself starts to complain:
+	// a percent of frames lost is visible, five percent is a broken stream.
+	auto grade = [](double value, double warning, double critical) {
+		if (value >= critical)
+			return Severity::Critical;
+		if (value >= warning)
+			return Severity::Warning;
+		return Severity::Normal;
+	};
+
+	switch (metric) {
+	case DisplayMetric::StreamDropped:
+	case DisplayMetric::RenderLag:
+	case DisplayMetric::EncodingLag: {
+		double loss = lossPercent(metric);
+		return loss < 0.0 ? Severity::Normal : grade(loss, 1.0, 5.0);
+	}
+	case DisplayMetric::CpuUsage:
+		return grade(metricState.cpuUsage, 75.0, 90.0);
+	case DisplayMetric::DiskFree: {
+		if (!metricState.diskKnown)
+			return Severity::Normal;
+		const double gib = 1024.0 * 1024.0 * 1024.0;
+		double free = static_cast<double>(metricState.diskFree) / gib;
+		if (free < 2.0)
+			return Severity::Critical;
+		if (free < 10.0)
+			return Severity::Warning;
+		return Severity::Normal;
+	}
+	case DisplayMetric::Fps: {
+		struct obs_video_info info = {};
+		if (!obs_get_video_info(&info) || !info.fps_den)
+			return Severity::Normal;
+		double target = static_cast<double>(info.fps_num) / static_cast<double>(info.fps_den);
+		double shortfall = target > 0.0 ? (1.0 - (obs_get_active_fps() / target)) * 100.0 : 0.0;
+		return grade(shortfall, 5.0, 15.0);
+	}
+	default:
+		return Severity::Normal;
+	}
+}
+
+BarState OmniBarMetrics::state(DisplayMetric metric)
+{
+	if (metric != DisplayMetric::Status)
+		return BarState::None;
+	if (metricState.streamStart)
+		return BarState::Live;
+	if (metricState.recordStart)
+		return metricState.recordPausedSince ? BarState::Paused : BarState::Recording;
+	return BarState::None;
+}
+
+BarState OmniBarMetrics::previewState(DisplayMetric metric, const ObsStateSnapshot *simulated)
+{
+	if (metric != DisplayMetric::Status)
+		return BarState::None;
+	if (!simulated || simulated->streaming)
+		return BarState::Live;
+	if (simulated->recording)
+		return simulated->recordingPaused ? BarState::Paused : BarState::Recording;
+	return BarState::None;
+}
+
+bool OmniBarMetrics::isLiveIn(DisplayMetric metric, const ObsStateSnapshot &state)
+{
+	switch (metric) {
+	case DisplayMetric::StreamTime:
+	case DisplayMetric::StreamBitrate:
+	case DisplayMetric::StreamDropped:
+		return state.streaming;
+	case DisplayMetric::RecordTime:
+	case DisplayMetric::RecordBitrate:
+	case DisplayMetric::RecordSize:
+		return state.recording;
+	case DisplayMetric::ReplayTime:
+	case DisplayMetric::ReplayLastSaved:
+		return state.replayBuffer;
+	case DisplayMetric::VirtualCamTime:
+		return state.virtualCam;
+	case DisplayMetric::Status:
+		return state.streaming || state.recording;
+	default:
+		return true;
+	}
 }
 
 QString OmniBarMetrics::label(DisplayMetric metric)

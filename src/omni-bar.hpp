@@ -29,17 +29,30 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QPair>
 #include <obs-frontend-api.h>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "bar-style.hpp"
+#include "settings-manager.hpp"
 
 class ButtonConfig;
+struct ActivationCondition;
 class QMainWindow;
 class QBoxLayout;
 
 // Icon for a button, recoloured to tint and rendered at size, falling back to a
-// sensible default for the button's action type.
-QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config, const QColor &tint, int size);
+// sensible default for the button's action type. When activeTint is given the
+// icon carries a second rendering in that colour for the button's active state.
+QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config, const QColor &tint, int size,
+			   const QColor &activeTint = QColor());
+
+// One of the plugin's own icons by file name, recoloured to tint - for the
+// settings window's own controls.
+QIcon omniBarBundledIcon(const QString &fileName, const QColor &tint, int size);
+
+// Property every widget on the bar carries with the id of the entry it was
+// built from, so the right-click menu can find what was clicked.
+extern const char *const kOmniBarEntryIdProperty;
 
 // Everything the bar puts on screen as a tool button: the buttons themselves
 // and the live readouts. Holds what the two have in common - the toolbar entry
@@ -104,6 +117,10 @@ public:
 	// re-evaluated after it does.
 	void refreshPulse();
 
+	// The edge of the window the button sits on, which decides where an
+	// underline indicator goes: on the side facing the window's content.
+	void setBarArea(Qt::ToolBarArea area);
+
 signals:
 	void expandRequested();
 	void hoverEntered();
@@ -126,10 +143,11 @@ private:
 	QRect indicatorRect() const;
 	void refreshVisibility() override;
 
-	// The stylesheet this button carries when it is not mid-breath: its own
-	// accent override, or nothing at all so the bar's sheet applies.
-	QString restingStyleSheet() const;
-	void applyPulseFrame();
+	bool isPulsing() const;
+	// Paints the active state: the fill under the button, or the line, dot or
+	// ring over it, at the strength the pulse is at right now.
+	void paintActiveUnderlay(QPainter &painter, const QColor &color);
+	void paintActiveOverlay(QPainter &painter, const QColor &color);
 
 	std::shared_ptr<ButtonConfig> buttonConfig;
 	bool showIndicator = false;
@@ -142,9 +160,9 @@ private:
 	// built without going back to the settings.
 	BarStyle appliedStyle;
 	// Only runs while this button is actually pulsing, which is rarely more
-	// than one or two buttons at a time.
+	// than one or two buttons at a time. Each tick only repaints.
 	QTimer *pulseTimer = nullptr;
-	QString pulseSheet;
+	Qt::ToolBarArea barArea = Qt::TopToolBarArea;
 };
 
 // A live number on the bar - stream time, bitrate, free disk space and so on.
@@ -162,17 +180,34 @@ public:
 	// call on every tick: the text is only reapplied when it has changed.
 	void updateValue();
 
+	// In preview mode, read as the readout would in this state - a stream
+	// timer showing its placeholder when the preview is not live.
+	void setSimulatedState(const ObsStateSnapshot &state);
+
 	std::shared_ptr<ButtonConfig> getConfig() const { return displayConfig; }
 
 protected:
 	void paintEvent(QPaintEvent *event) override;
+	// A readout takes the mouse so its tooltip can show, but there is
+	// nothing to press: clicks are passed on to the bar behind it.
+	void mousePressEvent(QMouseEvent *event) override;
+	void mouseReleaseEvent(QMouseEvent *event) override;
+	void mouseDoubleClickEvent(QMouseEvent *event) override;
 
 private:
 	void refreshVisibility() override;
+	// The colour the value is drawn in right now: a crossed threshold first,
+	// then the user's own colour, then the state it reports on.
+	QColor currentTextColor() const;
 
 	std::shared_ptr<ButtonConfig> displayConfig;
 	BarStyle appliedStyle;
 	bool conditionHolds = true;
+	// The text colour the stylesheet was last built for, so a readout only
+	// restyles when its colour actually changes.
+	QColor appliedTextColor;
+	bool sheetApplied = false;
+	std::optional<ObsStateSnapshot> simulated;
 };
 
 // A line across the bar, separating neighbouring buttons.
@@ -233,8 +268,29 @@ public:
 	void rebuildToolbar();
 	void updateButtonStates();
 
+	// Moves the bar to an edge, or takes it off the window, and remembers the
+	// choice - the one route used by the hotkeys, the right-click menu and
+	// anything else that is not the settings dialog.
+	static void moveTo(DockPosition position);
+
+	// Edits made from the bar's own right-click menu, straight to the saved
+	// entries: each saves, rebuilds the bar and refreshes an open settings
+	// window that has nothing of its own to lose. They return false when the
+	// entry cannot be found or the change would do nothing.
+	static bool setEntryShowCondition(const QString &id, const ActivationCondition &condition);
+	static bool moveEntry(const QString &id, int step);
+	static bool removeEntry(const QString &id);
+	static void setLocked(bool locked);
+
 public slots:
 	void refreshFromConfiguration();
+
+protected:
+	// Watches the main window, so an open flyout follows it when it moves
+	// and goes away when it is minimised.
+	bool eventFilter(QObject *watched, QEvent *event) override;
+	void moveEvent(QMoveEvent *event) override;
+	void resizeEvent(QResizeEvent *event) override;
 
 private slots:
 	void onUpdateTimer();
@@ -267,6 +323,13 @@ private:
 	bool groupConditionHolds(GroupRuntime *group) const;
 	void startHoverCollapse(GroupRuntime *group);
 	void cancelHoverCollapse(GroupRuntime *group);
+	// Whether a group's children may be on screen at all: its own button has
+	// to be on the bar, and a flyout also needs the window it hangs off to
+	// be showing.
+	bool groupAnchorUsable(GroupRuntime *group) const;
+	void repositionFlyouts();
+	void tagEntry(QWidget *widget, const std::shared_ptr<ButtonConfig> &config);
+	std::shared_ptr<ButtonConfig> entryAt(const QPoint &pos) const;
 	void applyStyleToBar();
 	Qt::ToolBarArea currentArea() const;
 	void scheduleUpdate();
@@ -285,8 +348,9 @@ private:
 	// Not everything the bar watches announces itself: a filter being
 	// switched on elsewhere, a readout counting up, free disk space falling.
 	QTimer *pollTimer;
-	QMenu *contextMenu;
 	QMainWindow *mainWindow = nullptr;
 	bool updatePending = false;
 	bool isRebuilding = false;
+	// Counts rebuilds, so a caller can tell whether one already happened.
+	int rebuildCount = 0;
 };

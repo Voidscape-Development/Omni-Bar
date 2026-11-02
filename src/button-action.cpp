@@ -19,37 +19,39 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "button-action.hpp"
 #include <obs-frontend-api.h>
 #include <obs-module.h>
+#include <util/config-file.h>
 #include <QUuid>
 #include <QStringList>
 
 // ActivationCondition implementation
-bool ActivationCondition::isSatisfied(const ButtonAction *action) const
+bool ActivationCondition::isSatisfied(const ButtonAction *action, const ObsStateSnapshot *simulated) const
 {
 	if (source == ConditionSource::Always)
 		return true;
 
+	ObsStateSnapshot obs = simulated ? *simulated : ObsStateSnapshot();
 	bool state = false;
 	switch (source) {
 	case ConditionSource::OwnAction:
-		state = action && action->isActive();
+		state = action && (simulated ? action->isActiveIn(*simulated) : action->isActive());
 		break;
 	case ConditionSource::Streaming:
-		state = obs_frontend_streaming_active();
+		state = simulated ? obs.streaming : obs_frontend_streaming_active();
 		break;
 	case ConditionSource::Recording:
-		state = obs_frontend_recording_active();
+		state = simulated ? obs.recording : obs_frontend_recording_active();
 		break;
 	case ConditionSource::RecordingPaused:
-		state = obs_frontend_recording_paused();
+		state = simulated ? obs.recordingPaused : obs_frontend_recording_paused();
 		break;
 	case ConditionSource::ReplayBuffer:
-		state = obs_frontend_replay_buffer_active();
+		state = simulated ? obs.replayBuffer : obs_frontend_replay_buffer_active();
 		break;
 	case ConditionSource::VirtualCam:
-		state = obs_frontend_virtualcam_active();
+		state = simulated ? obs.virtualCam : obs_frontend_virtualcam_active();
 		break;
 	case ConditionSource::StudioMode:
-		state = obs_frontend_preview_program_mode_active();
+		state = simulated ? obs.studioMode : obs_frontend_preview_program_mode_active();
 		break;
 	case ConditionSource::Always:
 		return true;
@@ -106,10 +108,27 @@ ActivationCondition ActivationCondition::deserialize(obs_data_t *data, const cha
 		return condition;
 
 	QString sourceKey = QString("%1_source").arg(prefix);
-	if (obs_data_has_user_value(data, sourceKey.toUtf8().constData()))
-		condition.source = static_cast<ConditionSource>(obs_data_get_int(data, sourceKey.toUtf8().constData()));
+	if (obs_data_has_user_value(data, sourceKey.toUtf8().constData())) {
+		// A value this version does not know would otherwise hide the
+		// entry for good, so it is treated as no condition at all.
+		long long stored = obs_data_get_int(data, sourceKey.toUtf8().constData());
+		if (stored >= static_cast<int>(ConditionSource::Always) &&
+		    stored <= static_cast<int>(ConditionSource::StudioMode))
+			condition.source = static_cast<ConditionSource>(stored);
+	}
 	condition.inverted = obs_data_get_bool(data, QString("%1_inverted").arg(prefix).toUtf8().constData());
 	return condition;
+}
+
+bool ButtonAction::isActiveIn(const ObsStateSnapshot &state) const
+{
+	BarState reports = barState();
+	return reports != BarState::None ? state.isActive(reports) : isActive();
+}
+
+QString ButtonAction::confirmationQuestion() const
+{
+	return QString::fromUtf8(obs_module_text("OmniBar.Confirm.Generic")).arg(getDisplayName());
 }
 
 // ButtonAction static deserialize
@@ -142,9 +161,18 @@ std::unique_ptr<ButtonAction> ButtonAction::deserialize(obs_data_t *data)
 		QString scene = QString::fromUtf8(obs_data_get_string(data, "scene"));
 		QString source = QString::fromUtf8(obs_data_get_string(data, "source"));
 		return std::make_unique<SourceVisibilityAction>(scene, source);
+	} else if (type == "scene") {
+		return std::make_unique<SceneAction>(QString::fromUtf8(obs_data_get_string(data, "scene")));
+	} else if (type == "audio_mute") {
+		long long stored = obs_data_get_int(data, "mode");
+		MuteMode mode = stored >= static_cast<int>(MuteMode::Toggle) &&
+						stored <= static_cast<int>(MuteMode::Unmute)
+					? static_cast<MuteMode>(stored)
+					: MuteMode::Toggle;
+		return std::make_unique<AudioMuteAction>(QString::fromUtf8(obs_data_get_string(data, "source")), mode);
 	} else if (type == "spacer") {
 		int width = static_cast<int>(obs_data_get_int(data, "width"));
-		return std::make_unique<SpacerAction>(width);
+		return std::make_unique<SpacerAction>(width > 0 ? width : 10, obs_data_get_bool(data, "expanding"));
 	} else if (type == "display") {
 		DisplayMetric metric = OmniBarMetrics::fromName(QString::fromUtf8(obs_data_get_string(data, "metric")));
 		int width = static_cast<int>(obs_data_get_int(data, "min_width"));
@@ -153,6 +181,8 @@ std::unique_ptr<ButtonAction> ButtonAction::deserialize(obs_data_t *data)
 		// here, and keep the 24-hour reading they were showing.
 		display->setClockFormat(OmniBarMetrics::clockFormatFromName(
 			QString::fromUtf8(obs_data_get_string(data, "clock_format"))));
+		if (obs_data_has_user_value(data, "warn_colors"))
+			display->setWarnColors(obs_data_get_bool(data, "warn_colors"));
 		return display;
 	} else if (type == "divider") {
 		int thickness = static_cast<int>(obs_data_get_int(data, "thickness"));
@@ -298,58 +328,148 @@ bool FrontendAction::isActive() const
 	return false;
 }
 
-// Locale key for the name shown to the user. Kept separate from the serialised
-// identifier, which must never change.
-static const char *frontendActionLabelKey(FrontendActionType type)
+const QList<FrontendActionInfo> &FrontendAction::all()
 {
-	switch (type) {
-	case FrontendActionType::StartStreaming:
-		return "OmniBar.Action.StartStream";
-	case FrontendActionType::StopStreaming:
-		return "OmniBar.Action.StopStream";
-	case FrontendActionType::ToggleStreaming:
-		return "OmniBar.Action.ToggleStream";
-	case FrontendActionType::StartRecording:
-		return "OmniBar.Action.StartRecord";
-	case FrontendActionType::StopRecording:
-		return "OmniBar.Action.StopRecord";
-	case FrontendActionType::ToggleRecording:
-		return "OmniBar.Action.ToggleRecord";
-	case FrontendActionType::PauseRecording:
-		return "OmniBar.Action.Pause";
-	case FrontendActionType::UnpauseRecording:
-		return "OmniBar.Action.Unpause";
-	case FrontendActionType::TogglePauseRecording:
-		return "OmniBar.Action.TogglePause";
-	case FrontendActionType::StartReplayBuffer:
-		return "OmniBar.Action.StartReplay";
-	case FrontendActionType::StopReplayBuffer:
-		return "OmniBar.Action.StopReplay";
-	case FrontendActionType::ToggleReplayBuffer:
-		return "OmniBar.Action.ToggleReplay";
-	case FrontendActionType::SaveReplayBuffer:
-		return "OmniBar.Action.SaveReplay";
-	case FrontendActionType::StartVirtualCam:
-		return "OmniBar.Action.StartVirtualCam";
-	case FrontendActionType::StopVirtualCam:
-		return "OmniBar.Action.StopVirtualCam";
-	case FrontendActionType::ToggleVirtualCam:
-		return "OmniBar.Action.ToggleVirtualCam";
-	case FrontendActionType::EnableStudioMode:
-		return "OmniBar.Action.EnableStudioMode";
-	case FrontendActionType::DisableStudioMode:
-		return "OmniBar.Action.DisableStudioMode";
-	case FrontendActionType::ToggleStudioMode:
-		return "OmniBar.Action.ToggleStudioMode";
-	case FrontendActionType::TransitionToProgram:
-		return "OmniBar.Action.Transition";
+	// Toggle comes first in each family: it is the variant most bars want.
+	static const QList<FrontendActionInfo> table = {
+		{FrontendActionType::ToggleStreaming, "toggle_streaming", "OmniBar.Action.ToggleStream", "stream.svg",
+		 "stream", "OmniBar.Variant.Toggle", BarState::Live},
+		{FrontendActionType::StartStreaming, "start_streaming", "OmniBar.Action.StartStream",
+		 "stream-start.svg", "stream", "OmniBar.Variant.Start", BarState::Live},
+		{FrontendActionType::StopStreaming, "stop_streaming", "OmniBar.Action.StopStream", "stream-stop.svg",
+		 "stream", "OmniBar.Variant.Stop", BarState::Live},
+		{FrontendActionType::ToggleRecording, "toggle_recording", "OmniBar.Action.ToggleRecord", "record.svg",
+		 "record", "OmniBar.Variant.Toggle", BarState::Recording},
+		{FrontendActionType::StartRecording, "start_recording", "OmniBar.Action.StartRecord",
+		 "record-start.svg", "record", "OmniBar.Variant.Start", BarState::Recording},
+		{FrontendActionType::StopRecording, "stop_recording", "OmniBar.Action.StopRecord", "record-stop.svg",
+		 "record", "OmniBar.Variant.Stop", BarState::Recording},
+		{FrontendActionType::TogglePauseRecording, "toggle_pause_recording", "OmniBar.Action.TogglePause",
+		 "pause-toggle.svg", "pause", "OmniBar.Variant.Toggle", BarState::Paused},
+		{FrontendActionType::PauseRecording, "pause_recording", "OmniBar.Action.Pause", "pause.svg", "pause",
+		 "OmniBar.Variant.Pause", BarState::Paused},
+		{FrontendActionType::UnpauseRecording, "unpause_recording", "OmniBar.Action.Unpause", "play.svg",
+		 "pause", "OmniBar.Variant.Resume", BarState::Paused},
+		{FrontendActionType::ToggleReplayBuffer, "toggle_replay_buffer", "OmniBar.Action.ToggleReplay",
+		 "replay.svg", "replay", "OmniBar.Variant.Toggle", BarState::Replay},
+		{FrontendActionType::StartReplayBuffer, "start_replay_buffer", "OmniBar.Action.StartReplay",
+		 "replay-start.svg", "replay", "OmniBar.Variant.Start", BarState::Replay},
+		{FrontendActionType::StopReplayBuffer, "stop_replay_buffer", "OmniBar.Action.StopReplay",
+		 "replay-stop.svg", "replay", "OmniBar.Variant.Stop", BarState::Replay},
+		{FrontendActionType::SaveReplayBuffer, "save_replay_buffer", "OmniBar.Action.SaveReplay",
+		 "save-replay.svg", "save_replay", nullptr, BarState::None},
+		{FrontendActionType::ToggleVirtualCam, "toggle_virtual_cam", "OmniBar.Action.ToggleVirtualCam",
+		 "virtual-cam.svg", "virtual_cam", "OmniBar.Variant.Toggle", BarState::VirtualCam},
+		{FrontendActionType::StartVirtualCam, "start_virtual_cam", "OmniBar.Action.StartVirtualCam",
+		 "virtual-cam-start.svg", "virtual_cam", "OmniBar.Variant.Start", BarState::VirtualCam},
+		{FrontendActionType::StopVirtualCam, "stop_virtual_cam", "OmniBar.Action.StopVirtualCam",
+		 "virtual-cam-stop.svg", "virtual_cam", "OmniBar.Variant.Stop", BarState::VirtualCam},
+		{FrontendActionType::ToggleStudioMode, "toggle_studio_mode", "OmniBar.Action.ToggleStudioMode",
+		 "studio-mode.svg", "studio", "OmniBar.Variant.Toggle", BarState::Studio},
+		{FrontendActionType::EnableStudioMode, "enable_studio_mode", "OmniBar.Action.EnableStudioMode",
+		 "studio-mode-on.svg", "studio", "OmniBar.Variant.On", BarState::Studio},
+		{FrontendActionType::DisableStudioMode, "disable_studio_mode", "OmniBar.Action.DisableStudioMode",
+		 "studio-mode-off.svg", "studio", "OmniBar.Variant.Off", BarState::Studio},
+		{FrontendActionType::TransitionToProgram, "transition_to_program", "OmniBar.Action.Transition",
+		 "transition.svg", "transition", nullptr, BarState::None},
+	};
+	return table;
+}
+
+const FrontendActionInfo &FrontendAction::info(FrontendActionType type)
+{
+	for (const auto &entry : all()) {
+		if (entry.type == type)
+			return entry;
 	}
-	return "OmniBar.Action.ToggleStream";
+	return all().first();
+}
+
+QList<FrontendActionType> FrontendAction::familyMembers(const QString &family)
+{
+	QList<FrontendActionType> members;
+	for (const auto &entry : all()) {
+		if (family == QLatin1String(entry.family))
+			members.append(entry.type);
+	}
+	return members;
+}
+
+BarState FrontendAction::barState() const
+{
+	return info(actionType).state;
+}
+
+// One of the "warn before" switches in the OBS general settings. OBS 31 keeps
+// them in the user configuration; the application configuration is checked as
+// well in case a build still has them there, and OBS's own default is used
+// when neither has been written.
+static bool obsWarnsBefore(const char *name, bool fallback)
+{
+	config_t *configs[] = {obs_frontend_get_user_config(), obs_frontend_get_app_config()};
+	for (config_t *config : configs) {
+		if (!config)
+			continue;
+		if (config_has_user_value(config, "BasicWindow", name) ||
+		    config_has_default_value(config, "BasicWindow", name))
+			return config_get_bool(config, "BasicWindow", name);
+	}
+	return fallback;
+}
+
+bool FrontendAction::obsWouldConfirm() const
+{
+	bool streaming = obs_frontend_streaming_active();
+	bool recording = obs_frontend_recording_active();
+
+	switch (actionType) {
+	case FrontendActionType::StartStreaming:
+		return !streaming && obsWarnsBefore("WarnBeforeStartingStream", false);
+	case FrontendActionType::StopStreaming:
+		return streaming && obsWarnsBefore("WarnBeforeStoppingStream", true);
+	case FrontendActionType::ToggleStreaming:
+		return streaming ? obsWarnsBefore("WarnBeforeStoppingStream", true)
+				 : obsWarnsBefore("WarnBeforeStartingStream", false);
+	case FrontendActionType::StopRecording:
+	case FrontendActionType::ToggleRecording:
+		return recording && obsWarnsBefore("WarnBeforeStoppingRecord", false);
+	default:
+		return false;
+	}
+}
+
+QString FrontendAction::confirmationQuestion() const
+{
+	bool streaming = obs_frontend_streaming_active();
+	bool recording = obs_frontend_recording_active();
+	const char *key = nullptr;
+
+	switch (actionType) {
+	case FrontendActionType::StartStreaming:
+		key = "OmniBar.Confirm.StartStream";
+		break;
+	case FrontendActionType::StopStreaming:
+		key = "OmniBar.Confirm.StopStream";
+		break;
+	case FrontendActionType::ToggleStreaming:
+		key = streaming ? "OmniBar.Confirm.StopStream" : "OmniBar.Confirm.StartStream";
+		break;
+	case FrontendActionType::StopRecording:
+		key = "OmniBar.Confirm.StopRecord";
+		break;
+	case FrontendActionType::ToggleRecording:
+		key = recording ? "OmniBar.Confirm.StopRecord" : nullptr;
+		break;
+	default:
+		break;
+	}
+
+	return key ? QString::fromUtf8(obs_module_text(key)) : ButtonAction::confirmationQuestion();
 }
 
 QString FrontendAction::getFrontendActionLabel(FrontendActionType type)
 {
-	return QString::fromUtf8(obs_module_text(frontendActionLabelKey(type)));
+	return QString::fromUtf8(obs_module_text(info(type).labelKey));
 }
 
 QString FrontendAction::getDisplayName() const
@@ -367,94 +487,15 @@ obs_data_t *FrontendAction::serialize() const
 
 QString FrontendAction::getFrontendActionName(FrontendActionType type)
 {
-	switch (type) {
-	case FrontendActionType::StartStreaming:
-		return "start_streaming";
-	case FrontendActionType::StopStreaming:
-		return "stop_streaming";
-	case FrontendActionType::ToggleStreaming:
-		return "toggle_streaming";
-	case FrontendActionType::StartRecording:
-		return "start_recording";
-	case FrontendActionType::StopRecording:
-		return "stop_recording";
-	case FrontendActionType::ToggleRecording:
-		return "toggle_recording";
-	case FrontendActionType::PauseRecording:
-		return "pause_recording";
-	case FrontendActionType::UnpauseRecording:
-		return "unpause_recording";
-	case FrontendActionType::TogglePauseRecording:
-		return "toggle_pause_recording";
-	case FrontendActionType::StartReplayBuffer:
-		return "start_replay_buffer";
-	case FrontendActionType::StopReplayBuffer:
-		return "stop_replay_buffer";
-	case FrontendActionType::ToggleReplayBuffer:
-		return "toggle_replay_buffer";
-	case FrontendActionType::SaveReplayBuffer:
-		return "save_replay_buffer";
-	case FrontendActionType::StartVirtualCam:
-		return "start_virtual_cam";
-	case FrontendActionType::StopVirtualCam:
-		return "stop_virtual_cam";
-	case FrontendActionType::ToggleVirtualCam:
-		return "toggle_virtual_cam";
-	case FrontendActionType::EnableStudioMode:
-		return "enable_studio_mode";
-	case FrontendActionType::DisableStudioMode:
-		return "disable_studio_mode";
-	case FrontendActionType::ToggleStudioMode:
-		return "toggle_studio_mode";
-	case FrontendActionType::TransitionToProgram:
-		return "transition_to_program";
-	}
-	return "unknown";
+	return QString::fromUtf8(info(type).id);
 }
 
 FrontendActionType FrontendAction::getFrontendActionFromName(const QString &name)
 {
-	if (name == "start_streaming")
-		return FrontendActionType::StartStreaming;
-	if (name == "stop_streaming")
-		return FrontendActionType::StopStreaming;
-	if (name == "toggle_streaming")
-		return FrontendActionType::ToggleStreaming;
-	if (name == "start_recording")
-		return FrontendActionType::StartRecording;
-	if (name == "stop_recording")
-		return FrontendActionType::StopRecording;
-	if (name == "toggle_recording")
-		return FrontendActionType::ToggleRecording;
-	if (name == "pause_recording")
-		return FrontendActionType::PauseRecording;
-	if (name == "unpause_recording")
-		return FrontendActionType::UnpauseRecording;
-	if (name == "toggle_pause_recording")
-		return FrontendActionType::TogglePauseRecording;
-	if (name == "start_replay_buffer")
-		return FrontendActionType::StartReplayBuffer;
-	if (name == "stop_replay_buffer")
-		return FrontendActionType::StopReplayBuffer;
-	if (name == "toggle_replay_buffer")
-		return FrontendActionType::ToggleReplayBuffer;
-	if (name == "save_replay_buffer")
-		return FrontendActionType::SaveReplayBuffer;
-	if (name == "start_virtual_cam")
-		return FrontendActionType::StartVirtualCam;
-	if (name == "stop_virtual_cam")
-		return FrontendActionType::StopVirtualCam;
-	if (name == "toggle_virtual_cam")
-		return FrontendActionType::ToggleVirtualCam;
-	if (name == "enable_studio_mode")
-		return FrontendActionType::EnableStudioMode;
-	if (name == "disable_studio_mode")
-		return FrontendActionType::DisableStudioMode;
-	if (name == "toggle_studio_mode")
-		return FrontendActionType::ToggleStudioMode;
-	if (name == "transition_to_program")
-		return FrontendActionType::TransitionToProgram;
-
+	for (const auto &entry : all()) {
+		if (name == QLatin1String(entry.id))
+			return entry.type;
+	}
 	return FrontendActionType::ToggleStreaming;
 }
 
@@ -663,68 +704,176 @@ SourceVisibilityAction::SourceVisibilityAction(const QString &scene, const QStri
 {
 }
 
+obs_source_t *SourceVisibilityAction::targetScene() const
+{
+	if (followsCurrentScene())
+		return obs_frontend_get_current_scene();
+	return obs_get_source_by_name(sceneName.toUtf8().constData());
+}
+
 void SourceVisibilityAction::execute()
 {
-	obs_source_t *sceneSource = obs_get_source_by_name(sceneName.toUtf8().constData());
+	obs_source_t *sceneSource = targetScene();
 	if (!sceneSource)
 		return;
 
 	obs_scene_t *scene = obs_scene_from_source(sceneSource);
-	if (!scene) {
-		obs_source_release(sceneSource);
-		return;
-	}
-
-	obs_sceneitem_t *item = obs_scene_find_source(scene, sourceName.toUtf8().constData());
-	if (item) {
-		bool visible = obs_sceneitem_visible(item);
-		obs_sceneitem_set_visible(item, !visible);
-	}
+	obs_sceneitem_t *item = scene ? obs_scene_find_source(scene, sourceName.toUtf8().constData()) : nullptr;
+	if (item)
+		obs_sceneitem_set_visible(item, !obs_sceneitem_visible(item));
 	obs_source_release(sceneSource);
 }
 
 bool SourceVisibilityAction::isActive() const
 {
-	obs_source_t *sceneSource = obs_get_source_by_name(sceneName.toUtf8().constData());
+	obs_source_t *sceneSource = targetScene();
 	if (!sceneSource)
 		return false;
 
 	obs_scene_t *scene = obs_scene_from_source(sceneSource);
-	if (!scene) {
-		obs_source_release(sceneSource);
-		return false;
-	}
-
-	obs_sceneitem_t *item = obs_scene_find_source(scene, sourceName.toUtf8().constData());
-	bool visible = false;
-	if (item) {
-		visible = obs_sceneitem_visible(item);
-	}
+	obs_sceneitem_t *item = scene ? obs_scene_find_source(scene, sourceName.toUtf8().constData()) : nullptr;
+	bool visible = item && obs_sceneitem_visible(item);
 	obs_source_release(sceneSource);
 	return visible;
 }
 
 bool SourceVisibilityAction::isValid() const
 {
-	obs_source_t *sceneSource = obs_get_source_by_name(sceneName.toUtf8().constData());
+	obs_source_t *sceneSource = targetScene();
 	if (!sceneSource)
 		return false;
 
 	obs_scene_t *scene = obs_scene_from_source(sceneSource);
-	if (!scene) {
-		obs_source_release(sceneSource);
-		return false;
-	}
-
-	obs_sceneitem_t *item = obs_scene_find_source(scene, sourceName.toUtf8().constData());
-	bool valid = item != nullptr;
+	bool valid = scene && obs_scene_find_source(scene, sourceName.toUtf8().constData()) != nullptr;
 	obs_source_release(sceneSource);
 	return valid;
 }
 
+bool SourceVisibilityAction::sourceMissing() const
+{
+	if (!followsCurrentScene())
+		return !isValid();
+
+	obs_source_t *source = obs_get_source_by_name(sourceName.toUtf8().constData());
+	if (!source)
+		return true;
+	obs_source_release(source);
+	return false;
+}
+
 QString SourceVisibilityAction::getDisplayName() const
 {
+	if (followsCurrentScene())
+		return QString::fromUtf8(obs_module_text("OmniBar.Summary.VisibilityCurrent")).arg(sourceName);
 	return QString::fromUtf8(obs_module_text("OmniBar.Summary.Visibility")).arg(sourceName, sceneName);
+}
+
+// SceneAction implementation
+SceneAction::SceneAction(const QString &scene) : sceneName(scene) {}
+
+void SceneAction::execute()
+{
+	obs_source_t *source = obs_get_source_by_name(sceneName.toUtf8().constData());
+	if (!source)
+		return;
+	if (obs_scene_from_source(source))
+		obs_frontend_set_current_scene(source);
+	obs_source_release(source);
+}
+
+bool SceneAction::isActive() const
+{
+	obs_source_t *current = obs_frontend_get_current_scene();
+	if (!current)
+		return false;
+	bool active = sceneName == QString::fromUtf8(obs_source_get_name(current));
+	obs_source_release(current);
+	return active;
+}
+
+bool SceneAction::isValid() const
+{
+	obs_source_t *source = obs_get_source_by_name(sceneName.toUtf8().constData());
+	if (!source)
+		return false;
+	bool valid = obs_scene_from_source(source) != nullptr;
+	obs_source_release(source);
+	return valid;
+}
+
+QString SceneAction::getDisplayName() const
+{
+	return QString::fromUtf8(obs_module_text("OmniBar.Summary.Scene")).arg(sceneName);
+}
+
+obs_data_t *SceneAction::serialize() const
+{
+	obs_data_t *data = obs_data_create();
+	obs_data_set_string(data, "type", "scene");
+	obs_data_set_string(data, "scene", sceneName.toUtf8().constData());
+	return data;
+}
+
+// AudioMuteAction implementation
+AudioMuteAction::AudioMuteAction(const QString &source, MuteMode muteMode) : sourceName(source), mode(muteMode) {}
+
+void AudioMuteAction::execute()
+{
+	obs_source_t *source = obs_get_source_by_name(sourceName.toUtf8().constData());
+	if (!source)
+		return;
+
+	switch (mode) {
+	case MuteMode::Toggle:
+		obs_source_set_muted(source, !obs_source_muted(source));
+		break;
+	case MuteMode::Mute:
+		obs_source_set_muted(source, true);
+		break;
+	case MuteMode::Unmute:
+		obs_source_set_muted(source, false);
+		break;
+	}
+	obs_source_release(source);
+}
+
+bool AudioMuteAction::isActive() const
+{
+	obs_source_t *source = obs_get_source_by_name(sourceName.toUtf8().constData());
+	if (!source)
+		return false;
+	bool muted = obs_source_muted(source);
+	obs_source_release(source);
+	return muted;
+}
+
+bool AudioMuteAction::isValid() const
+{
+	obs_source_t *source = obs_get_source_by_name(sourceName.toUtf8().constData());
+	if (!source)
+		return false;
+	bool audio = (obs_source_get_output_flags(source) & OBS_SOURCE_AUDIO) != 0;
+	obs_source_release(source);
+	return audio;
+}
+
+QString AudioMuteAction::getDisplayName() const
+{
+	const char *key = "OmniBar.Summary.MuteToggle";
+	if (mode == MuteMode::Mute)
+		key = "OmniBar.Summary.Mute";
+	else if (mode == MuteMode::Unmute)
+		key = "OmniBar.Summary.Unmute";
+	return QString::fromUtf8(obs_module_text(key)).arg(sourceName);
+}
+
+obs_data_t *AudioMuteAction::serialize() const
+{
+	obs_data_t *data = obs_data_create();
+	obs_data_set_string(data, "type", "audio_mute");
+	obs_data_set_string(data, "source", sourceName.toUtf8().constData());
+	obs_data_set_int(data, "mode", static_cast<int>(mode));
+	return data;
 }
 
 obs_data_t *SourceVisibilityAction::serialize() const
@@ -737,7 +886,7 @@ obs_data_t *SourceVisibilityAction::serialize() const
 }
 
 // SpacerAction implementation
-SpacerAction::SpacerAction(int width) : spacerWidth(width) {}
+SpacerAction::SpacerAction(int width, bool expand) : spacerWidth(width), expanding(expand) {}
 
 QString SpacerAction::getDisplayName() const
 {
@@ -749,6 +898,7 @@ obs_data_t *SpacerAction::serialize() const
 	obs_data_t *data = obs_data_create();
 	obs_data_set_string(data, "type", "spacer");
 	obs_data_set_int(data, "width", spacerWidth);
+	obs_data_set_bool(data, "expanding", expanding);
 	return data;
 }
 
@@ -781,6 +931,11 @@ bool DisplayAction::isActive() const
 	return OmniBarMetrics::isLive(metric);
 }
 
+bool DisplayAction::isActiveIn(const ObsStateSnapshot &state) const
+{
+	return OmniBarMetrics::isLiveIn(metric, state);
+}
+
 QString DisplayAction::currentValue() const
 {
 	return OmniBarMetrics::value(metric, clockFormat);
@@ -798,6 +953,7 @@ obs_data_t *DisplayAction::serialize() const
 	obs_data_set_string(data, "metric", OmniBarMetrics::name(metric).toUtf8().constData());
 	obs_data_set_int(data, "min_width", minimumWidth);
 	obs_data_set_string(data, "clock_format", OmniBarMetrics::clockFormatName(clockFormat).toUtf8().constData());
+	obs_data_set_bool(data, "warn_colors", warnColors);
 	return data;
 }
 
@@ -820,6 +976,7 @@ obs_data_t *ButtonConfig::serialize() const
 	obs_data_set_string(data, "custom_color",
 			    customColor.isValid() ? customColor.name(QColor::HexArgb).toUtf8().constData() : "");
 	obs_data_set_bool(data, "pulse_when_active", pulseWhenActive);
+	obs_data_set_int(data, "confirm_mode", static_cast<int>(confirmMode));
 	showCondition.serialize(data, "show_condition");
 	obs_data_set_bool(data, "is_group", isGroup);
 	obs_data_set_int(data, "group_display", static_cast<int>(groupDisplay));
@@ -858,7 +1015,16 @@ std::shared_ptr<ButtonConfig> ButtonConfig::deserialize(obs_data_t *data)
 	config->label = QString::fromUtf8(obs_data_get_string(data, "label"));
 	config->tooltip = QString::fromUtf8(obs_data_get_string(data, "tooltip"));
 	config->iconPath = QString::fromUtf8(obs_data_get_string(data, "icon"));
-	config->displayMode = static_cast<ButtonDisplayMode>(obs_data_get_int(data, "display_mode"));
+	// Numbers outside what this version knows fall back to the default
+	// rather than reaching a switch that has no case for them.
+	auto bounded = [data](const char *key, int low, int high, int fallback) {
+		long long stored = obs_data_get_int(data, key);
+		return stored >= low && stored <= high ? static_cast<int>(stored) : fallback;
+	};
+
+	config->displayMode = static_cast<ButtonDisplayMode>(
+		bounded("display_mode", static_cast<int>(ButtonDisplayMode::IconOnly),
+			static_cast<int>(ButtonDisplayMode::TextAbove), static_cast<int>(ButtonDisplayMode::IconOnly)));
 	config->tintIcon = obs_data_get_bool(data, "tint_icon");
 
 	config->useCustomColor = obs_data_get_bool(data, "use_custom_color");
@@ -872,13 +1038,20 @@ std::shared_ptr<ButtonConfig> ButtonConfig::deserialize(obs_data_t *data)
 		config->useCustomColor = false;
 
 	config->pulseWhenActive = obs_data_get_bool(data, "pulse_when_active");
+	config->confirmMode = static_cast<ConfirmMode>(bounded("confirm_mode", static_cast<int>(ConfirmMode::FollowObs),
+							       static_cast<int>(ConfirmMode::Never),
+							       static_cast<int>(ConfirmMode::FollowObs)));
 
 	config->showCondition = ActivationCondition::deserialize(data, "show_condition");
 
 	if (obs_data_has_user_value(data, "is_group")) {
 		config->isGroup = obs_data_get_bool(data, "is_group");
-		config->groupDisplay = static_cast<GroupDisplayMode>(obs_data_get_int(data, "group_display"));
-		config->groupExpand = static_cast<GroupExpandMode>(obs_data_get_int(data, "group_expand"));
+		config->groupDisplay = static_cast<GroupDisplayMode>(bounded(
+			"group_display", static_cast<int>(GroupDisplayMode::Flyout),
+			static_cast<int>(GroupDisplayMode::Inline), static_cast<int>(GroupDisplayMode::Flyout)));
+		config->groupExpand = static_cast<GroupExpandMode>(
+			bounded("group_expand", static_cast<int>(GroupExpandMode::Click),
+				static_cast<int>(GroupExpandMode::Hover), static_cast<int>(GroupExpandMode::Click)));
 		config->expandCondition = ActivationCondition::deserialize(data, "expand_condition");
 	} else {
 		// Configurations written before groups were reworked used
@@ -954,6 +1127,49 @@ bool ButtonConfig::hasAction() const
 	return action && action->getType() != ActionType::None && !isDecoration();
 }
 
+bool ButtonConfig::needsConfirmation() const
+{
+	if (!hasAction())
+		return false;
+
+	switch (confirmMode) {
+	case ConfirmMode::Always:
+		return true;
+	case ConfirmMode::Never:
+		return false;
+	case ConfirmMode::FollowObs:
+		return action->obsWouldConfirm();
+	}
+	return false;
+}
+
+QColor ButtonConfig::activeColor(const BarStyle &style) const
+{
+	if (useCustomColor && customColor.isValid())
+		return customColor;
+	return style.stateColor(hasAction() ? action->barState() : BarState::None);
+}
+
+bool ButtonConfig::targetMissing() const
+{
+	if (!action)
+		return false;
+
+	switch (action->getType()) {
+	case ActionType::SourceVisibility: {
+		auto *visibility = dynamic_cast<SourceVisibilityAction *>(action.get());
+		return visibility ? visibility->sourceMissing() : !action->isValid();
+	}
+	case ActionType::SourceHotkey:
+	case ActionType::SourceFilter:
+	case ActionType::Scene:
+	case ActionType::AudioMute:
+		return !action->isValid();
+	default:
+		return false;
+	}
+}
+
 bool ButtonConfig::isValid() const
 {
 	if (!action)
@@ -991,6 +1207,8 @@ QString ButtonConfig::summaryText() const
 {
 	if (isSpacer()) {
 		auto *spacer = dynamic_cast<SpacerAction *>(action.get());
+		if (spacer && spacer->isExpanding())
+			return QString::fromUtf8(obs_module_text("OmniBar.Summary.FlexibleSpace"));
 		return QString("%1 px").arg(spacer ? spacer->getWidth() : 0);
 	}
 

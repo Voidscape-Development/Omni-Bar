@@ -44,6 +44,18 @@ static void onFrontendEvent(enum obs_frontend_event event, void *data)
 		SettingsManager::save();
 }
 
+// OBS saves whenever its own state changes, applying its settings included, so
+// writing alongside it keeps hotkey bindings safe from a crash instead of
+// relying on a clean exit to save them.
+static void onFrontendSave(obs_data_t *saveData, bool saving, void *data)
+{
+	UNUSED_PARAMETER(saveData);
+	UNUSED_PARAMETER(data);
+
+	if (saving)
+		SettingsManager::save();
+}
+
 bool obs_module_load(void)
 {
 	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
@@ -82,6 +94,7 @@ bool obs_module_load(void)
 	obs_frontend_pop_ui_translation();
 
 	obs_frontend_add_event_callback(onFrontendEvent, nullptr);
+	obs_frontend_add_save_callback(onFrontendSave, nullptr);
 
 	obs_log(LOG_INFO, "OmniBar initialized");
 	return true;
@@ -89,6 +102,7 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+	obs_frontend_remove_save_callback(onFrontendSave, nullptr);
 	obs_frontend_remove_event_callback(onFrontendEvent, nullptr);
 	OmniBarHotkeys::unregisterAll();
 	OmniBarMetrics::stop();
@@ -103,5 +117,5 @@ const char *obs_module_name(void)
 
 const char *obs_module_description(void)
 {
-	return "A configurable toolbar with dynamic hotkey buttons for OBS Studio";
+	return "A configurable toolbar for OBS Studio, with buttons, groups and live readouts";
 }
