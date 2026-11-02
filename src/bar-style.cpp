@@ -132,10 +132,38 @@ QString BarStyle::presetName(StylePreset preset)
 		return "modern_rounded";
 	case StylePreset::NeonAccent:
 		return "neon_accent";
+	case StylePreset::Broadcast:
+		return "broadcast";
+	case StylePreset::Capsule:
+		return "capsule";
+	case StylePreset::MonoLine:
+		return "mono_line";
+	case StylePreset::HighContrast:
+		return "high_contrast";
+	case StylePreset::Phosphor:
+		return "phosphor";
+	case StylePreset::Daylight:
+		return "daylight";
 	case StylePreset::Custom:
 		return "custom";
 	}
 	return "obs_native";
+}
+
+// The six state colours plus the two readout warnings, in one call so a preset
+// cannot set some and forget the rest.
+static void setStates(BarStyle &style, const QColor &live, const QColor &recording, const QColor &paused,
+		      const QColor &replay, const QColor &virtualCam, const QColor &studio, const QColor &warning,
+		      const QColor &critical)
+{
+	style.stateLive = live;
+	style.stateRecording = recording;
+	style.statePaused = paused;
+	style.stateReplay = replay;
+	style.stateVirtualCam = virtualCam;
+	style.stateStudio = studio;
+	style.warningColor = warning;
+	style.criticalColor = critical;
 }
 
 BarStyle BarStyle::fromPreset(StylePreset preset)
@@ -146,12 +174,25 @@ BarStyle BarStyle::fromPreset(StylePreset preset)
 	// Start from the palette so every preset has concrete, editable colours
 	// even when it is set to follow the OBS theme.
 	QPalette palette = QApplication::palette();
+	bool dark = omniBarIsDarkTheme();
+	QColor highlight = palette.color(QPalette::Highlight);
+
 	style.barBackground = QColor(0, 0, 0, 0);
 	style.buttonBackground = QColor(0, 0, 0, 0);
-	style.buttonHover = withAlpha(palette.color(QPalette::Highlight), 70);
-	style.buttonChecked = palette.color(QPalette::Highlight);
+	style.buttonHover = withAlpha(highlight, 70);
+	style.buttonChecked = highlight;
 	style.buttonBorder = palette.color(QPalette::Mid);
 	style.textColor = palette.color(QPalette::ButtonText);
+
+	// Tally colours that read on whichever background the theme has. Studio
+	// mode keeps the theme's own highlight, since it is a mode of OBS rather
+	// than something going out.
+	if (dark)
+		setStates(style, QColor("#e5484d"), QColor("#e5484d"), QColor("#f5a524"), QColor("#30a46c"),
+			  QColor("#8e7cf0"), highlight, QColor("#f5a524"), QColor("#e5484d"));
+	else
+		setStates(style, QColor("#d92d34"), QColor("#d92d34"), QColor("#b86e00"), QColor("#18794e"),
+			  QColor("#6e56cf"), highlight, QColor("#b86e00"), QColor("#d92d34"));
 
 	switch (preset) {
 	case StylePreset::ObsNative:
@@ -173,23 +214,20 @@ BarStyle BarStyle::fromPreset(StylePreset preset)
 		style.useCustomColors = false;
 		break;
 
-	case StylePreset::ModernRounded: {
+	case StylePreset::ModernRounded:
 		style.iconSize = 32;
 		style.spacing = 6;
 		style.buttonPadding = 8;
 		style.cornerRadius = 8;
 		style.borderWidth = 1;
 		style.useCustomColors = true;
-
-		bool dark = omniBarIsDarkTheme();
 		style.barBackground = QColor(0, 0, 0, 0);
 		style.buttonBackground = dark ? QColor(255, 255, 255, 18) : QColor(0, 0, 0, 12);
 		style.buttonHover = dark ? QColor(255, 255, 255, 38) : QColor(0, 0, 0, 26);
-		style.buttonChecked = palette.color(QPalette::Highlight);
+		style.buttonChecked = highlight;
 		style.buttonBorder = dark ? QColor(255, 255, 255, 40) : QColor(0, 0, 0, 40);
 		style.textColor = palette.color(QPalette::ButtonText);
 		break;
-	}
 
 	case StylePreset::NeonAccent: {
 		style.iconSize = 28;
@@ -209,8 +247,120 @@ BarStyle BarStyle::fromPreset(StylePreset preset)
 		style.buttonChecked = accent;
 		style.buttonBorder = withAlpha(accent, 110);
 		style.textColor = QColor(235, 245, 250);
+		setStates(style, QColor("#ff3d8b"), QColor("#ff3d8b"), QColor("#ffd166"), accent, QColor("#b388ff"),
+			  accent, QColor("#ffd166"), QColor("#ff3d8b"));
 		break;
 	}
+
+	case StylePreset::Broadcast:
+		// Graphite with hairline-quiet buttons: on air, the only colour on
+		// the bar is whatever is actually going out.
+		style.iconSize = 26;
+		style.spacing = 4;
+		style.buttonPadding = 6;
+		style.cornerRadius = 3;
+		style.borderWidth = 0;
+		style.indicator = ActiveIndicator::Underline;
+		style.useCustomColors = true;
+		style.barBackground = QColor("#14161b");
+		style.buttonBackground = QColor(0, 0, 0, 0);
+		style.buttonHover = QColor("#232730");
+		style.buttonChecked = QColor("#4aa3ff");
+		style.buttonBorder = QColor("#2a2e37");
+		style.textColor = QColor("#c9ced8");
+		setStates(style, QColor("#ff4d4f"), QColor("#ff6b3d"), QColor("#f5a524"), QColor("#3ecf8e"),
+			  QColor("#9d8cff"), QColor("#4aa3ff"), QColor("#f5a524"), QColor("#ff4d4f"));
+		break;
+
+	case StylePreset::Capsule:
+		// Round buttons marked with a dot rather than filled.
+		style.iconSize = 24;
+		style.spacing = 6;
+		style.buttonPadding = 8;
+		style.cornerRadius = 32;
+		style.borderWidth = 0;
+		style.indicator = ActiveIndicator::Dot;
+		style.useCustomColors = true;
+		style.barBackground = QColor("#2a2d36");
+		style.buttonBackground = QColor(0, 0, 0, 0);
+		style.buttonHover = QColor(255, 255, 255, 23);
+		style.buttonChecked = QColor("#6e9bff");
+		style.buttonBorder = QColor(255, 255, 255, 18);
+		style.textColor = QColor("#dfe2e8");
+		setStates(style, QColor("#ff5c64"), QColor("#ff5c64"), QColor("#ffb224"), QColor("#46d39a"),
+			  QColor("#a493ff"), QColor("#6e9bff"), QColor("#ffb224"), QColor("#ff5c64"));
+		break;
+
+	case StylePreset::MonoLine: {
+		// No fills at all: outlined buttons, a ring for active, and one ink
+		// for everything except going out.
+		style.iconSize = 24;
+		style.spacing = 4;
+		style.buttonPadding = 6;
+		style.cornerRadius = 6;
+		style.borderWidth = 1;
+		style.indicator = ActiveIndicator::Ring;
+		style.useCustomColors = false;
+		QColor ink = palette.color(QPalette::ButtonText);
+		setStates(style, style.stateLive, style.stateRecording, ink, ink, ink, ink, style.warningColor,
+			  style.criticalColor);
+		break;
+	}
+
+	case StylePreset::HighContrast:
+		// Black, white and one yellow, with borders thick enough to find.
+		style.iconSize = 28;
+		style.spacing = 4;
+		style.buttonPadding = 6;
+		style.cornerRadius = 4;
+		style.borderWidth = 2;
+		style.pulseIntensity = 40;
+		style.useCustomColors = true;
+		style.barBackground = QColor("#000000");
+		style.buttonBackground = QColor("#000000");
+		style.buttonHover = QColor("#333333");
+		style.buttonChecked = QColor("#ffd400");
+		style.buttonBorder = QColor("#ffffff");
+		style.textColor = QColor("#ffffff");
+		setStates(style, QColor("#ffd400"), QColor("#ffd400"), QColor("#ffd400"), QColor("#ffd400"),
+			  QColor("#ffd400"), QColor("#ffd400"), QColor("#ffd400"), QColor("#ff4d4d"));
+		break;
+
+	case StylePreset::Phosphor:
+		// A green-screen terminal, with red kept back for going out.
+		style.iconSize = 24;
+		style.spacing = 4;
+		style.buttonPadding = 6;
+		style.cornerRadius = 2;
+		style.borderWidth = 0;
+		style.useCustomColors = true;
+		style.barBackground = QColor("#07130c");
+		style.buttonBackground = QColor(0, 0, 0, 0);
+		style.buttonHover = QColor("#0d2416");
+		style.buttonChecked = QColor("#39d98a");
+		style.buttonBorder = QColor("#14361f");
+		style.textColor = QColor("#7dffb0");
+		setStates(style, QColor("#ff5f56"), QColor("#ff5f56"), QColor("#ffd36e"), QColor("#39d98a"),
+			  QColor("#39d98a"), QColor("#39d98a"), QColor("#ffd36e"), QColor("#ff5f56"));
+		break;
+
+	case StylePreset::Daylight:
+		// For the light OBS themes: a white bar with soft hover fills.
+		style.iconSize = 26;
+		style.spacing = 4;
+		style.buttonPadding = 6;
+		style.cornerRadius = 6;
+		style.borderWidth = 0;
+		style.useCustomColors = true;
+		style.barBackground = QColor("#ffffff");
+		style.buttonBackground = QColor(0, 0, 0, 0);
+		style.buttonHover = QColor("#eef1f5");
+		style.buttonChecked = QColor("#2b59c3");
+		style.buttonBorder = QColor("#d5dae1");
+		style.textColor = QColor("#2a2f37");
+		setStates(style, QColor("#d92d34"), QColor("#d92d34"), QColor("#b86e00"), QColor("#18794e"),
+			  QColor("#6e56cf"), QColor("#2b59c3"), QColor("#b86e00"), QColor("#d92d34"));
+		break;
 	}
 
 	return style;
@@ -258,6 +408,60 @@ QColor BarStyle::effectiveTextColor() const
 	return QApplication::palette().color(QPalette::ButtonText);
 }
 
+QColor BarStyle::stateColor(BarState state) const
+{
+	QColor color;
+	if (useStateColors) {
+		switch (state) {
+		case BarState::Live:
+			color = stateLive;
+			break;
+		case BarState::Recording:
+			color = stateRecording;
+			break;
+		case BarState::Paused:
+			color = statePaused;
+			break;
+		case BarState::Replay:
+			color = stateReplay;
+			break;
+		case BarState::VirtualCam:
+			color = stateVirtualCam;
+			break;
+		case BarState::Studio:
+			color = stateStudio;
+			break;
+		case BarState::None:
+			break;
+		}
+	}
+	return color.isValid() ? color : effectiveButtonChecked();
+}
+
+QColor BarStyle::severityColor(Severity severity) const
+{
+	switch (severity) {
+	case Severity::Warning:
+		return warningColor.isValid() ? warningColor : QColor("#f5a524");
+	case Severity::Critical:
+		return criticalColor.isValid() ? criticalColor : QColor("#e5484d");
+	case Severity::Normal:
+		break;
+	}
+	return QColor();
+}
+
+int BarStyle::effectiveCornerRadius(int width, int height) const
+{
+	return qMax(0, qMin(cornerRadius, qMin(width, height) / 2));
+}
+
+QColor omniBarContrastingColor(const QColor &fill)
+{
+	int luminance = (fill.red() * 299 + fill.green() * 587 + fill.blue() * 114) / 1000;
+	return luminance < 150 ? QColor(255, 255, 255) : QColor(17, 19, 24);
+}
+
 int BarStyle::buttonExtent() const
 {
 	// Every entry on the bar that is not stacking its label over its icon is
@@ -270,19 +474,20 @@ int BarStyle::buttonExtent() const
 }
 
 // Shared button rules, reused for the toolbar, the flyout panels and the
-// editor's preview so all three render a button identically.
+// editor's preview so all three render a button identically. The active state
+// is painted by the button itself - it can breathe, and it can be a line or a
+// dot rather than a fill - so the checked rule only clears the way for it.
 static QString buttonRules(const QString &selector, const BarStyle &style, const QColor &background,
-			   const QColor &hover, const QColor &checked, const QColor &border, const QColor &text,
-			   const QColor &backdrop, const QColor &checkedBorderFill = QColor())
+			   const QColor &hover, const QColor &border, const QColor &text, const QColor &backdrop)
 {
 	// Each state fills the button with a different colour, and the border is
 	// drawn over that fill, so the resolved border has to be worked out once
-	// per state rather than once for the button. A caller whose active fill
-	// moves on its own passes the fill to settle the border against, so the
-	// border does not move with it.
+	// per state rather than once for the button.
 	QColor restingBorder = solidBorder(border, background, backdrop);
 	QColor hoverBorder = solidBorder(border, hover, backdrop);
-	QColor checkedBorder = solidBorder(border, checkedBorderFill.isValid() ? checkedBorderFill : checked, backdrop);
+
+	// A radius beyond half the button bends its edges inside out.
+	int radius = style.effectiveCornerRadius(style.buttonExtent(), style.buttonExtent());
 
 	return QString("%1 {"
 		       " background-color: %2;"
@@ -292,19 +497,17 @@ static QString buttonRules(const QString &selector, const BarStyle &style, const
 		       " color: %7;"
 		       " }"
 		       "%1:hover { background-color: %8; border-color: %9; }"
-		       "%1:checked { background-color: %10; border-color: %11; }"
-		       "%1:pressed { background-color: %10; border-color: %11; }")
+		       "%1:pressed { background-color: %8; border-color: %9; }"
+		       "%1:checked { background-color: transparent; border-color: %4; }")
 		.arg(selector)
 		.arg(cssColor(background))
 		.arg(style.borderWidth)
 		.arg(cssColor(restingBorder))
-		.arg(style.cornerRadius)
+		.arg(radius)
 		.arg(style.buttonPadding)
 		.arg(cssColor(text))
 		.arg(cssColor(hover))
-		.arg(cssColor(hoverBorder))
-		.arg(cssColor(checked))
-		.arg(cssColor(checkedBorder));
+		.arg(cssColor(hoverBorder));
 }
 
 QString BarStyle::barStyleSheet() const
@@ -320,8 +523,7 @@ QString BarStyle::barStyleSheet() const
 				.arg(qMax(0, spacing / 2));
 
 	sheet += buttonRules("QToolBar#OmniBar QToolButton", *this, effectiveButtonBackground(), effectiveButtonHover(),
-			     effectiveButtonChecked(), effectiveButtonBorder(), effectiveTextColor(),
-			     barBackdrop(*this));
+			     effectiveButtonBorder(), effectiveTextColor(), barBackdrop(*this));
 	return sheet;
 }
 
@@ -330,33 +532,18 @@ QString BarStyle::buttonAccentStyleSheet(const QColor &accent) const
 	if (!accent.isValid())
 		return QString();
 
-	// The override recolours the states that read as "this button is on":
-	// hover gets a translucent tint of the accent, checked gets it solid.
-	return buttonRules("QToolButton", *this, effectiveButtonBackground(), withAlpha(accent, 90), accent,
+	// The active state is painted in the accent by the button; hover gets a
+	// translucent tint of it so the two read as belonging together.
+	return buttonRules("QToolButton", *this, effectiveButtonBackground(), withAlpha(accent, 90),
 			   effectiveButtonBorder(), effectiveTextColor(), barBackdrop(*this));
 }
 
-QString BarStyle::displayAccentStyleSheet(const QColor &accent) const
+QString BarStyle::displayStyleSheet(const QColor &text) const
 {
-	if (!accent.isValid())
-		return QString();
-
-	return buttonRules("QToolButton", *this, effectiveButtonBackground(), effectiveButtonHover(),
-			   effectiveButtonChecked(), effectiveButtonBorder(), accent, barBackdrop(*this));
-}
-
-QString BarStyle::buttonPulseStyleSheet(const QColor &accent, qreal factor) const
-{
-	QColor base = accent.isValid() ? accent : effectiveButtonChecked();
-
-	// Only the active fill breathes: the icon, the label and the border stay
-	// put, so the button never reads as flickering or disabled.
-	QColor dimmed = withAlpha(base, qRound(base.alpha() * qBound(0.0, factor, 1.0)));
-
-	// The border is settled against the accent at full strength, so it holds
-	// still while the fill underneath it breathes.
-	return buttonRules("QToolButton", *this, effectiveButtonBackground(), withAlpha(base, 90), dimmed,
-			   effectiveButtonBorder(), effectiveTextColor(), barBackdrop(*this), base);
+	// Every state matches the resting one: a readout never lights up.
+	QColor background = effectiveButtonBackground();
+	return buttonRules("QToolButton", *this, background, background, effectiveButtonBorder(),
+			   text.isValid() ? text : effectiveTextColor(), barBackdrop(*this));
 }
 
 QString BarStyle::panelStyleSheet(const QString &objectName) const
@@ -385,7 +572,7 @@ QString BarStyle::panelStyleSheet(const QString &objectName) const
 	// A panel is opaque by construction, so it is the whole of what sits
 	// behind the buttons it holds.
 	sheet += buttonRules(container + " QToolButton", *this, effectiveButtonBackground(), effectiveButtonHover(),
-			     effectiveButtonChecked(), effectiveButtonBorder(), effectiveTextColor(), panel);
+			     effectiveButtonBorder(), effectiveTextColor(), panel);
 	return sheet;
 }
 
@@ -412,6 +599,20 @@ obs_data_t *BarStyle::serialize() const
 	obs_data_set_string(data, "button_checked", buttonChecked.name(QColor::HexArgb).toUtf8().constData());
 	obs_data_set_string(data, "button_border", buttonBorder.name(QColor::HexArgb).toUtf8().constData());
 	obs_data_set_string(data, "text_color", textColor.name(QColor::HexArgb).toUtf8().constData());
+	obs_data_set_int(data, "indicator", static_cast<int>(indicator));
+	obs_data_set_bool(data, "use_state_colors", useStateColors);
+
+	auto setColor = [data](const char *key, const QColor &color) {
+		obs_data_set_string(data, key, color.name(QColor::HexArgb).toUtf8().constData());
+	};
+	setColor("state_live", stateLive);
+	setColor("state_recording", stateRecording);
+	setColor("state_paused", statePaused);
+	setColor("state_replay", stateReplay);
+	setColor("state_virtual_cam", stateVirtualCam);
+	setColor("state_studio", stateStudio);
+	setColor("warning_color", warningColor);
+	setColor("critical_color", criticalColor);
 	return data;
 }
 
@@ -426,24 +627,27 @@ static QColor readColor(obs_data_t *data, const char *key, const QColor &fallbac
 
 static StylePreset presetFromName(const QString &name)
 {
-	if (name == "compact")
-		return StylePreset::Compact;
-	if (name == "modern_rounded")
-		return StylePreset::ModernRounded;
-	if (name == "neon_accent")
-		return StylePreset::NeonAccent;
-	if (name == "custom")
-		return StylePreset::Custom;
+	const StylePreset all[] = {StylePreset::ObsNative,  StylePreset::Compact,      StylePreset::ModernRounded,
+				   StylePreset::NeonAccent, StylePreset::Broadcast,    StylePreset::Capsule,
+				   StylePreset::MonoLine,   StylePreset::HighContrast, StylePreset::Phosphor,
+				   StylePreset::Daylight,   StylePreset::Custom};
+	for (StylePreset preset : all) {
+		if (name == BarStyle::presetName(preset))
+			return preset;
+	}
 	return StylePreset::ObsNative;
 }
 
 BarStyle BarStyle::deserialize(obs_data_t *data)
 {
-	BarStyle style = BarStyle::fromPreset(StylePreset::ObsNative);
 	if (!data)
-		return style;
+		return BarStyle::fromPreset(StylePreset::ObsNative);
 
-	style.preset = presetFromName(QString::fromUtf8(obs_data_get_string(data, "preset")));
+	// Start from the stored preset, so a value a newer version added - the
+	// state colours, the indicator - takes that preset's choice rather than
+	// some other preset's.
+	StylePreset preset = presetFromName(QString::fromUtf8(obs_data_get_string(data, "preset")));
+	BarStyle style = BarStyle::fromPreset(preset);
 
 	if (obs_data_has_user_value(data, "icon_size"))
 		style.iconSize = static_cast<int>(obs_data_get_int(data, "icon_size"));
@@ -461,12 +665,34 @@ BarStyle BarStyle::deserialize(obs_data_t *data)
 		style.pulseIntensity = static_cast<int>(obs_data_get_int(data, "pulse_intensity"));
 	style.useCustomColors = obs_data_get_bool(data, "use_custom_colors");
 
+	if (obs_data_has_user_value(data, "indicator")) {
+		int stored = static_cast<int>(obs_data_get_int(data, "indicator"));
+		if (stored >= static_cast<int>(ActiveIndicator::Fill) &&
+		    stored <= static_cast<int>(ActiveIndicator::Ring))
+			style.indicator = static_cast<ActiveIndicator>(stored);
+	}
+
+	if (obs_data_has_user_value(data, "use_state_colors"))
+		style.useStateColors = obs_data_get_bool(data, "use_state_colors");
+	else if (preset == StylePreset::Custom)
+		// A hand-built style from before state colours existed keeps the
+		// single active colour it was built around.
+		style.useStateColors = false;
+
 	style.barBackground = readColor(data, "bar_background", style.barBackground);
 	style.buttonBackground = readColor(data, "button_background", style.buttonBackground);
 	style.buttonHover = readColor(data, "button_hover", style.buttonHover);
 	style.buttonChecked = readColor(data, "button_checked", style.buttonChecked);
 	style.buttonBorder = readColor(data, "button_border", style.buttonBorder);
 	style.textColor = readColor(data, "text_color", style.textColor);
+	style.stateLive = readColor(data, "state_live", style.stateLive);
+	style.stateRecording = readColor(data, "state_recording", style.stateRecording);
+	style.statePaused = readColor(data, "state_paused", style.statePaused);
+	style.stateReplay = readColor(data, "state_replay", style.stateReplay);
+	style.stateVirtualCam = readColor(data, "state_virtual_cam", style.stateVirtualCam);
+	style.stateStudio = readColor(data, "state_studio", style.stateStudio);
+	style.warningColor = readColor(data, "warning_color", style.warningColor);
+	style.criticalColor = readColor(data, "critical_color", style.criticalColor);
 
 	if (style.iconSize <= 0)
 		style.iconSize = 32;
@@ -489,8 +715,13 @@ bool BarStyle::operator==(const BarStyle &other) const
 	return preset == other.preset && iconSize == other.iconSize && spacing == other.spacing &&
 	       buttonPadding == other.buttonPadding && cornerRadius == other.cornerRadius &&
 	       borderWidth == other.borderWidth && pulsePeriod == other.pulsePeriod &&
-	       pulseIntensity == other.pulseIntensity && useCustomColors == other.useCustomColors &&
-	       barBackground == other.barBackground && buttonBackground == other.buttonBackground &&
-	       buttonHover == other.buttonHover && buttonChecked == other.buttonChecked &&
-	       buttonBorder == other.buttonBorder && textColor == other.textColor;
+	       pulseIntensity == other.pulseIntensity && indicator == other.indicator &&
+	       useCustomColors == other.useCustomColors && barBackground == other.barBackground &&
+	       buttonBackground == other.buttonBackground && buttonHover == other.buttonHover &&
+	       buttonChecked == other.buttonChecked && buttonBorder == other.buttonBorder &&
+	       textColor == other.textColor && useStateColors == other.useStateColors && stateLive == other.stateLive &&
+	       stateRecording == other.stateRecording && statePaused == other.statePaused &&
+	       stateReplay == other.stateReplay && stateVirtualCam == other.stateVirtualCam &&
+	       stateStudio == other.stateStudio && warningColor == other.warningColor &&
+	       criticalColor == other.criticalColor;
 }

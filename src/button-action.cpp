@@ -19,6 +19,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "button-action.hpp"
 #include <obs-frontend-api.h>
 #include <obs-module.h>
+#include <util/config-file.h>
 #include <QUuid>
 #include <QStringList>
 
@@ -106,10 +107,21 @@ ActivationCondition ActivationCondition::deserialize(obs_data_t *data, const cha
 		return condition;
 
 	QString sourceKey = QString("%1_source").arg(prefix);
-	if (obs_data_has_user_value(data, sourceKey.toUtf8().constData()))
-		condition.source = static_cast<ConditionSource>(obs_data_get_int(data, sourceKey.toUtf8().constData()));
+	if (obs_data_has_user_value(data, sourceKey.toUtf8().constData())) {
+		// A value this version does not know would otherwise hide the
+		// entry for good, so it is treated as no condition at all.
+		long long stored = obs_data_get_int(data, sourceKey.toUtf8().constData());
+		if (stored >= static_cast<int>(ConditionSource::Always) &&
+		    stored <= static_cast<int>(ConditionSource::StudioMode))
+			condition.source = static_cast<ConditionSource>(stored);
+	}
 	condition.inverted = obs_data_get_bool(data, QString("%1_inverted").arg(prefix).toUtf8().constData());
 	return condition;
+}
+
+QString ButtonAction::confirmationQuestion() const
+{
+	return QString::fromUtf8(obs_module_text("OmniBar.Confirm.Generic")).arg(getDisplayName());
 }
 
 // ButtonAction static deserialize
@@ -144,7 +156,7 @@ std::unique_ptr<ButtonAction> ButtonAction::deserialize(obs_data_t *data)
 		return std::make_unique<SourceVisibilityAction>(scene, source);
 	} else if (type == "spacer") {
 		int width = static_cast<int>(obs_data_get_int(data, "width"));
-		return std::make_unique<SpacerAction>(width);
+		return std::make_unique<SpacerAction>(width > 0 ? width : 10, obs_data_get_bool(data, "expanding"));
 	} else if (type == "display") {
 		DisplayMetric metric = OmniBarMetrics::fromName(QString::fromUtf8(obs_data_get_string(data, "metric")));
 		int width = static_cast<int>(obs_data_get_int(data, "min_width"));
@@ -153,6 +165,8 @@ std::unique_ptr<ButtonAction> ButtonAction::deserialize(obs_data_t *data)
 		// here, and keep the 24-hour reading they were showing.
 		display->setClockFormat(OmniBarMetrics::clockFormatFromName(
 			QString::fromUtf8(obs_data_get_string(data, "clock_format"))));
+		if (obs_data_has_user_value(data, "warn_colors"))
+			display->setWarnColors(obs_data_get_bool(data, "warn_colors"));
 		return display;
 	} else if (type == "divider") {
 		int thickness = static_cast<int>(obs_data_get_int(data, "thickness"));
@@ -296,6 +310,107 @@ bool FrontendAction::isActive() const
 		return false;
 	}
 	return false;
+}
+
+BarState FrontendAction::barState() const
+{
+	switch (actionType) {
+	case FrontendActionType::StartStreaming:
+	case FrontendActionType::StopStreaming:
+	case FrontendActionType::ToggleStreaming:
+		return BarState::Live;
+	case FrontendActionType::StartRecording:
+	case FrontendActionType::StopRecording:
+	case FrontendActionType::ToggleRecording:
+		return BarState::Recording;
+	case FrontendActionType::PauseRecording:
+	case FrontendActionType::UnpauseRecording:
+	case FrontendActionType::TogglePauseRecording:
+		return BarState::Paused;
+	case FrontendActionType::StartReplayBuffer:
+	case FrontendActionType::StopReplayBuffer:
+	case FrontendActionType::ToggleReplayBuffer:
+		return BarState::Replay;
+	case FrontendActionType::StartVirtualCam:
+	case FrontendActionType::StopVirtualCam:
+	case FrontendActionType::ToggleVirtualCam:
+		return BarState::VirtualCam;
+	case FrontendActionType::EnableStudioMode:
+	case FrontendActionType::DisableStudioMode:
+	case FrontendActionType::ToggleStudioMode:
+		return BarState::Studio;
+	case FrontendActionType::SaveReplayBuffer:
+	case FrontendActionType::TransitionToProgram:
+		return BarState::None;
+	}
+	return BarState::None;
+}
+
+// One of the "warn before" switches in the OBS general settings. OBS 31 keeps
+// them in the user configuration; the application configuration is checked as
+// well in case a build still has them there, and OBS's own default is used
+// when neither has been written.
+static bool obsWarnsBefore(const char *name, bool fallback)
+{
+	config_t *configs[] = {obs_frontend_get_user_config(), obs_frontend_get_app_config()};
+	for (config_t *config : configs) {
+		if (!config)
+			continue;
+		if (config_has_user_value(config, "BasicWindow", name) ||
+		    config_has_default_value(config, "BasicWindow", name))
+			return config_get_bool(config, "BasicWindow", name);
+	}
+	return fallback;
+}
+
+bool FrontendAction::obsWouldConfirm() const
+{
+	bool streaming = obs_frontend_streaming_active();
+	bool recording = obs_frontend_recording_active();
+
+	switch (actionType) {
+	case FrontendActionType::StartStreaming:
+		return !streaming && obsWarnsBefore("WarnBeforeStartingStream", false);
+	case FrontendActionType::StopStreaming:
+		return streaming && obsWarnsBefore("WarnBeforeStoppingStream", true);
+	case FrontendActionType::ToggleStreaming:
+		return streaming ? obsWarnsBefore("WarnBeforeStoppingStream", true)
+				 : obsWarnsBefore("WarnBeforeStartingStream", false);
+	case FrontendActionType::StopRecording:
+	case FrontendActionType::ToggleRecording:
+		return recording && obsWarnsBefore("WarnBeforeStoppingRecord", false);
+	default:
+		return false;
+	}
+}
+
+QString FrontendAction::confirmationQuestion() const
+{
+	bool streaming = obs_frontend_streaming_active();
+	bool recording = obs_frontend_recording_active();
+	const char *key = nullptr;
+
+	switch (actionType) {
+	case FrontendActionType::StartStreaming:
+		key = "OmniBar.Confirm.StartStream";
+		break;
+	case FrontendActionType::StopStreaming:
+		key = "OmniBar.Confirm.StopStream";
+		break;
+	case FrontendActionType::ToggleStreaming:
+		key = streaming ? "OmniBar.Confirm.StopStream" : "OmniBar.Confirm.StartStream";
+		break;
+	case FrontendActionType::StopRecording:
+		key = "OmniBar.Confirm.StopRecord";
+		break;
+	case FrontendActionType::ToggleRecording:
+		key = recording ? "OmniBar.Confirm.StopRecord" : nullptr;
+		break;
+	default:
+		break;
+	}
+
+	return key ? QString::fromUtf8(obs_module_text(key)) : ButtonAction::confirmationQuestion();
 }
 
 // Locale key for the name shown to the user. Kept separate from the serialised
@@ -737,7 +852,7 @@ obs_data_t *SourceVisibilityAction::serialize() const
 }
 
 // SpacerAction implementation
-SpacerAction::SpacerAction(int width) : spacerWidth(width) {}
+SpacerAction::SpacerAction(int width, bool expand) : spacerWidth(width), expanding(expand) {}
 
 QString SpacerAction::getDisplayName() const
 {
@@ -749,6 +864,7 @@ obs_data_t *SpacerAction::serialize() const
 	obs_data_t *data = obs_data_create();
 	obs_data_set_string(data, "type", "spacer");
 	obs_data_set_int(data, "width", spacerWidth);
+	obs_data_set_bool(data, "expanding", expanding);
 	return data;
 }
 
@@ -798,6 +914,7 @@ obs_data_t *DisplayAction::serialize() const
 	obs_data_set_string(data, "metric", OmniBarMetrics::name(metric).toUtf8().constData());
 	obs_data_set_int(data, "min_width", minimumWidth);
 	obs_data_set_string(data, "clock_format", OmniBarMetrics::clockFormatName(clockFormat).toUtf8().constData());
+	obs_data_set_bool(data, "warn_colors", warnColors);
 	return data;
 }
 
@@ -820,6 +937,7 @@ obs_data_t *ButtonConfig::serialize() const
 	obs_data_set_string(data, "custom_color",
 			    customColor.isValid() ? customColor.name(QColor::HexArgb).toUtf8().constData() : "");
 	obs_data_set_bool(data, "pulse_when_active", pulseWhenActive);
+	obs_data_set_int(data, "confirm_mode", static_cast<int>(confirmMode));
 	showCondition.serialize(data, "show_condition");
 	obs_data_set_bool(data, "is_group", isGroup);
 	obs_data_set_int(data, "group_display", static_cast<int>(groupDisplay));
@@ -858,7 +976,16 @@ std::shared_ptr<ButtonConfig> ButtonConfig::deserialize(obs_data_t *data)
 	config->label = QString::fromUtf8(obs_data_get_string(data, "label"));
 	config->tooltip = QString::fromUtf8(obs_data_get_string(data, "tooltip"));
 	config->iconPath = QString::fromUtf8(obs_data_get_string(data, "icon"));
-	config->displayMode = static_cast<ButtonDisplayMode>(obs_data_get_int(data, "display_mode"));
+	// Numbers outside what this version knows fall back to the default
+	// rather than reaching a switch that has no case for them.
+	auto bounded = [data](const char *key, int low, int high, int fallback) {
+		long long stored = obs_data_get_int(data, key);
+		return stored >= low && stored <= high ? static_cast<int>(stored) : fallback;
+	};
+
+	config->displayMode = static_cast<ButtonDisplayMode>(
+		bounded("display_mode", static_cast<int>(ButtonDisplayMode::IconOnly),
+			static_cast<int>(ButtonDisplayMode::TextAbove), static_cast<int>(ButtonDisplayMode::IconOnly)));
 	config->tintIcon = obs_data_get_bool(data, "tint_icon");
 
 	config->useCustomColor = obs_data_get_bool(data, "use_custom_color");
@@ -872,13 +999,20 @@ std::shared_ptr<ButtonConfig> ButtonConfig::deserialize(obs_data_t *data)
 		config->useCustomColor = false;
 
 	config->pulseWhenActive = obs_data_get_bool(data, "pulse_when_active");
+	config->confirmMode = static_cast<ConfirmMode>(bounded("confirm_mode", static_cast<int>(ConfirmMode::FollowObs),
+							       static_cast<int>(ConfirmMode::Never),
+							       static_cast<int>(ConfirmMode::FollowObs)));
 
 	config->showCondition = ActivationCondition::deserialize(data, "show_condition");
 
 	if (obs_data_has_user_value(data, "is_group")) {
 		config->isGroup = obs_data_get_bool(data, "is_group");
-		config->groupDisplay = static_cast<GroupDisplayMode>(obs_data_get_int(data, "group_display"));
-		config->groupExpand = static_cast<GroupExpandMode>(obs_data_get_int(data, "group_expand"));
+		config->groupDisplay = static_cast<GroupDisplayMode>(bounded(
+			"group_display", static_cast<int>(GroupDisplayMode::Flyout),
+			static_cast<int>(GroupDisplayMode::Inline), static_cast<int>(GroupDisplayMode::Flyout)));
+		config->groupExpand = static_cast<GroupExpandMode>(
+			bounded("group_expand", static_cast<int>(GroupExpandMode::Click),
+				static_cast<int>(GroupExpandMode::Hover), static_cast<int>(GroupExpandMode::Click)));
 		config->expandCondition = ActivationCondition::deserialize(data, "expand_condition");
 	} else {
 		// Configurations written before groups were reworked used
@@ -954,6 +1088,44 @@ bool ButtonConfig::hasAction() const
 	return action && action->getType() != ActionType::None && !isDecoration();
 }
 
+bool ButtonConfig::needsConfirmation() const
+{
+	if (!hasAction())
+		return false;
+
+	switch (confirmMode) {
+	case ConfirmMode::Always:
+		return true;
+	case ConfirmMode::Never:
+		return false;
+	case ConfirmMode::FollowObs:
+		return action->obsWouldConfirm();
+	}
+	return false;
+}
+
+QColor ButtonConfig::activeColor(const BarStyle &style) const
+{
+	if (useCustomColor && customColor.isValid())
+		return customColor;
+	return style.stateColor(hasAction() ? action->barState() : BarState::None);
+}
+
+bool ButtonConfig::targetMissing() const
+{
+	if (!action)
+		return false;
+
+	switch (action->getType()) {
+	case ActionType::SourceHotkey:
+	case ActionType::SourceFilter:
+	case ActionType::SourceVisibility:
+		return !action->isValid();
+	default:
+		return false;
+	}
+}
+
 bool ButtonConfig::isValid() const
 {
 	if (!action)
@@ -991,6 +1163,8 @@ QString ButtonConfig::summaryText() const
 {
 	if (isSpacer()) {
 		auto *spacer = dynamic_cast<SpacerAction *>(action.get());
+		if (spacer && spacer->isExpanding())
+			return QString::fromUtf8(obs_module_text("OmniBar.Summary.FlexibleSpace"));
 		return QString("%1 px").arg(spacer ? spacer->getWidth() : 0);
 	}
 

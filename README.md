@@ -25,6 +25,10 @@ Each button runs one of:
 Buttons that describe a state — toggle streaming, a filter, a scene item's visibility — show that
 state, so the bar doubles as a status readout.
 
+Stopping the stream or a recording from the bar asks first exactly when the OBS controls would, following
+the confirmation settings under **Settings → General**. Any button can instead be set to always ask, or
+never.
+
 ### Groups
 
 A button can be a group holding other buttons. Each group chooses independently:
@@ -63,23 +67,34 @@ Add one from the same menu as a button, and pick what it reads:
 | **Streaming** | Stream time, stream bitrate, dropped frames (count and percentage) |
 | **Recording** | Recording time (which stands still while the recording is paused), recording bitrate, file size so far, free space on the recording drive |
 | **Replay buffer and virtual camera** | How long each has been running, and how long since the last replay was saved |
+| **Status** | One chip that reads OFF AIR, or LIVE and REC with their timers, coloured by what is going out and amber while a recording is paused |
 | **Performance** | CPU usage, frame rate, average frame time, render lag frames, encoding lag frames, memory usage, and the time of day |
 
 A display takes the same label, icon, placement and condition settings as a button — so it can carry
 a prefix such as `LIVE`, sit beside its own glyph, and appear only while it has something to say. Its
 colour setting recolours the value itself, and a **minimum width** stops the bar shuffling as the
 digits change, since digits are rarely all the same width. A readout whose feature is not running
-shows a placeholder rather than a zero.
+shows a placeholder rather than a zero. Timers start from OBS's own start, stop and pause events, so they
+agree with the OBS status bar.
+
+Readouts with a level worth watching change colour when they cross it: dropped, render-lag and
+encoding-lag frames above 1% (critical above 5%), CPU above 75% (90%), the frame rate more than 5% under
+target (15%), and under 10 GB free on the recording drive (2 GB). This can be turned off per readout.
 
 ### Layout
 
-- **Spacer** — blank space of a chosen size
+- **Spacer** — blank space of a chosen size, or a **flexible space** that takes whatever room the bar has
+  left, pushing everything after it to the far end
 - **Divider** — a line across the bar, with configurable thickness, length (as a percentage of the
   bar's thickness, so it can be inset from the edges) and an optional colour
 
 Both turn with the bar when it is docked left or right.
 
 ### Appearance
+
+Each output lights up in its own colour while it is running — live, recording, paused, replay buffer,
+virtual camera and studio mode — and a theme can mark an active button with a **fill**, an **underline**
+on the side facing the window, a **corner dot** or a **ring**.
 
 Every button carries an optional label, placed **left of**, **right of**, **above** or **below** its
 icon, or shown alone. Icons come from the bundled set — every action has its own, so start, stop and
@@ -99,11 +114,18 @@ The bar itself starts from a preset:
 | **OBS Native** | Flat and transparent, following the current OBS theme |
 | **Compact** | Small icons and tight spacing, for many buttons in a small space |
 | **Modern Rounded** | Rounded, raised buttons with a soft border and generous padding |
+| **Broadcast** | Graphite bar with underlined active buttons and broadcast tally colours |
+| **Capsule** | Round buttons marked with a corner dot |
+| **Mono Line** | No fills: outlined buttons and a ring for active, in the OBS theme's colours |
 | **Neon Accent** | Dark bar with a bright accent on hover and active states |
+| **Phosphor** | A green-screen terminal, with red kept for going out |
+| **High Contrast** | Black and white with thick borders and yellow active fills |
+| **Daylight** | A white bar for the light OBS themes |
 
 Every value a preset sets — icon size, spacing, button padding, corner radius, border width, pulse
-speed and intensity, and the bar, button, hover, active, border and text colours — stays individually
-editable, and changing one switches the preset to Custom. Colours track the OBS theme until you turn
+speed and intensity, the active-state style, the bar, button, hover, active, border and text colours, and
+the state and warning colours — stays individually editable, and changing one switches the preset to
+Custom. Colours track the OBS theme until you turn
 custom colours on.
 
 ### Position and hotkeys
@@ -132,20 +154,27 @@ Requires OBS Studio 31.1.1 or newer.
 ## Usage
 
 Open **Tools → Omni Bar Settings**, or right-click the bar itself and choose **Configure Omni Bar…**
+Right-clicking a button or readout also offers to edit that entry directly, and to move the bar to
+another edge.
 
 The **Buttons** tab lists what is on the bar. **Add** offers a button, a group, a display, a spacer or
 a divider.
-Drag a row to reorder it, or drop it onto a group row to move it into that group. The same tab sets
+Drag a row to reorder it, or drop it onto a group row to move it into that group. **Delete** removes the
+selected row, **F2** or **Enter** edits it and **Ctrl+D** duplicates it. A button whose source, filter or
+hotkey cannot be found is marked in the list, and its editor keeps the stored name rather than
+switching it to another source. The same tab sets
 which edge of the window the bar docks to, or hides it with **None**.
 
-Double-click a row to edit it. The editor previews the entry as the bar will actually draw it while
+Double-click a row to edit it. The editor opens on what the entry does, with its appearance, when it
+is shown and, for a group, its children on the tabs beside. It previews the entry as the bar will actually draw it while
 you change its label, icon, colour and action. A display previews a representative reading, so it can
 be sized and placed without having to go live first.
 
 The **Appearance** tab holds the presets and every style value, with a live preview of the bar.
 
 Settings are written to `config.json` in the plugin's configuration directory, alongside your other
-OBS plugin settings.
+OBS plugin settings, whenever OBS saves its own. Closing the settings window with changes that have not
+been applied asks whether to keep them.
 
 ## Building
 

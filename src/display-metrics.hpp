@@ -20,6 +20,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <QString>
 
+#include "bar-style.hpp"
+
 // A single number a Display entry can show on the bar. The values are written
 // to the configuration file only through the names below, so the numbers
 // themselves are free to move; the names are not.
@@ -40,7 +42,10 @@ enum class DisplayMetric {
 	RenderLag,
 	EncodingLag,
 	Memory,
-	Clock
+	Clock,
+	// Off air, live, recording or paused, with the matching timers: the one
+	// reading people look for before any other.
+	Status
 };
 
 // How the Time of day readout writes the hour. Stored by name, like the metrics
@@ -52,14 +57,16 @@ enum class ClockFormat { Hours24 = 0, Hours12 = 1 };
 // buttons showing the same metric must agree with one another.
 namespace OmniBarMetrics {
 
-// Sets up the process counters. Safe to call more than once.
+// Sets up the process counters and starts listening for outputs starting and
+// stopping. Safe to call more than once.
 void start();
 void stop();
 
-// Collects everything that has to be measured over time - how long each output
-// has been running, and the byte and CPU deltas the rates are derived from.
-// Called on the bar's tick; the rates update themselves about once a second
-// however often this runs.
+// Collects everything that has to be measured over time - the byte and CPU
+// deltas the rates are derived from - and catches up with any output that
+// started or stopped without saying so. The run timers themselves are taken
+// from OBS's own start, stop and pause events. Called on the bar's tick; the
+// rates update themselves about once a second however often this runs.
 void sample();
 
 // Current reading, formatted for the bar. Metrics whose output is not running
@@ -74,6 +81,18 @@ QString previewValue(DisplayMetric metric, ClockFormat clockFormat = ClockFormat
 // True while the thing this metric describes is running, which is what a
 // Display entry's "this button's action is active" condition tests.
 bool isLive(DisplayMetric metric);
+
+// Whether the reading needs attention: dropped frames climbing, the CPU
+// pinned, the recording drive filling up. Metrics without a threshold are
+// always Normal.
+Severity severity(DisplayMetric metric);
+bool hasThresholds(DisplayMetric metric);
+
+// What the reading is reporting on, for metrics that are coloured by the state
+// they describe - the status chip lights up red while live and amber while
+// paused. None for the rest.
+BarState state(DisplayMetric metric);
+BarState previewState(DisplayMetric metric);
 
 // Translated name shown to the user.
 QString label(DisplayMetric metric);

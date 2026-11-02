@@ -77,8 +77,10 @@ signals:
 	void changed();
 
 private:
+	// Always, while, or while not - then what is being watched, which is
+	// only shown once there is something to watch.
+	QComboBox *modeCombo;
 	QComboBox *sourceCombo;
-	QCheckBox *invertCheck;
 };
 
 // Renders one button exactly as the bar would, over the bar's own backdrop.
@@ -137,6 +139,7 @@ private:
 	void buildMetricCombo();
 	QWidget *createAppearanceTab();
 	QWidget *createActionTab();
+	QWidget *createVisibilityTab();
 	QWidget *createGroupTab();
 
 	void populateFromConfig();
@@ -195,12 +198,15 @@ private:
 	QComboBox *filterCombo = nullptr;
 	QComboBox *visibilitySceneCombo = nullptr;
 	QComboBox *visibilitySourceCombo = nullptr;
+	QComboBox *confirmCombo = nullptr;
 	QSpinBox *spacerWidthSpin = nullptr;
+	QCheckBox *spacerExpandCheck = nullptr;
 
 	// Display
 	QComboBox *displayMetricCombo = nullptr;
 	QComboBox *displayClockFormatCombo = nullptr;
 	QSpinBox *displayWidthSpin = nullptr;
+	QCheckBox *displayWarnCheck = nullptr;
 
 	// Divider
 	QSpinBox *dividerThicknessSpin = nullptr;
@@ -235,7 +241,10 @@ public:
 	explicit OmniBarConfig(QWidget *parent = nullptr);
 	~OmniBarConfig();
 
-	static void showDialog();
+	// Opens the dialog, or brings it forward. With an entry id it also opens
+	// the editor for that entry, which is how the bar's right-click menu
+	// edits the button under the pointer.
+	static void showDialog(const QString &editId = QString());
 
 	// A hotkey can move the bar while the dialog is open. Without this the
 	// dialog would still be showing the old position and put it back on OK.
@@ -257,6 +266,11 @@ private slots:
 	void onOk();
 	void onCancel();
 
+public slots:
+	// Closing with unsaved edits asks whether to keep them first, whether
+	// the dialog is closed with Cancel, Escape or the window's own button.
+	void reject() override;
+
 private:
 	void setupUI();
 	QWidget *createButtonsTab();
@@ -268,7 +282,9 @@ private:
 	void updateStyleWidgets();
 	void refreshStylePreview();
 	void addNewEntry(std::shared_ptr<ButtonConfig> config);
-	void pickColor(QColor &target, QPushButton *swatch);
+	void editEntry(const QString &id);
+	void markDirty();
+	void setDirty(bool value);
 
 	// Config a tree row stands for, or nullptr for a row that has gone stale.
 	std::shared_ptr<ButtonConfig> configForItem(QTreeWidgetItem *item) const;
@@ -285,6 +301,7 @@ private:
 	QPushButton *moveUpButton = nullptr;
 	QPushButton *moveDownButton = nullptr;
 	QComboBox *dockPositionCombo = nullptr;
+	QLabel *unsavedLabel = nullptr;
 
 	// Style
 	QComboBox *presetCombo = nullptr;
@@ -295,6 +312,10 @@ private:
 	QSpinBox *borderWidthSpin = nullptr;
 	QSpinBox *pulsePeriodSpin = nullptr;
 	QSpinBox *pulseIntensitySpin = nullptr;
+	QComboBox *indicatorCombo = nullptr;
+	QCheckBox *useStateColorsCheck = nullptr;
+	QWidget *stateColorGrid = nullptr;
+	QList<QPair<QPushButton *, QColor BarStyle::*>> colorSwatches;
 	QCheckBox *useCustomColorsCheck = nullptr;
 	QWidget *colorGrid = nullptr;
 	QPushButton *barBackgroundButton = nullptr;
@@ -311,4 +332,5 @@ private:
 	QHash<QString, std::shared_ptr<ButtonConfig>> configRegistry;
 	BarStyle workingStyle;
 	bool updatingStyleWidgets = false;
+	bool dirty = false;
 };

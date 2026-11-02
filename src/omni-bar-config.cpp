@@ -42,6 +42,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QAbstractItemView>
 #include <QUuid>
 #include <QStandardItemModel>
+#include <QShortcut>
+#include <QKeySequence>
+#include <QScrollArea>
 
 static const int kConfigIdRole = Qt::UserRole;
 static const int kConfigIsGroupRole = Qt::UserRole + 1;
@@ -80,6 +83,27 @@ static void setColorSwatch(QPushButton *button, const QColor &color)
 	button->setText(color.name(QColor::HexArgb).toUpper());
 }
 
+// Selects the entry whose data is value. One that is no longer there - a source
+// deleted, or one that belongs to another scene collection - is added and
+// marked as missing rather than quietly swapped for whatever happens to be
+// first in the list, which pressing OK would then save.
+static void selectOrKeepMissing(QComboBox *combo, const QString &value)
+{
+	if (!combo)
+		return;
+
+	int index = combo->findData(value);
+	if (index < 0 && !value.isEmpty()) {
+		combo->insertItem(0, QString::fromUtf8(obs_module_text("OmniBar.Settings.MissingFormat")).arg(value),
+				  value);
+		combo->setItemData(0, QString::fromUtf8(obs_module_text("OmniBar.Settings.MissingHint")),
+				   Qt::ToolTipRole);
+		index = 0;
+	}
+	if (index >= 0)
+		combo->setCurrentIndex(index);
+}
+
 // ============================================================================
 // ConditionEditor
 // ============================================================================
@@ -89,8 +113,15 @@ ConditionEditor::ConditionEditor(bool allowOwnAction, QWidget *parent) : QWidget
 	QHBoxLayout *layout = new QHBoxLayout(this);
 	layout->setContentsMargins(0, 0, 0, 0);
 
+	// Reads as a sentence - "While not / Streaming" - rather than a state
+	// with a checkbox saying "not active" hanging off the end of it.
+	modeCombo = new QComboBox();
+	modeCombo->addItem(obs_module_text("OmniBar.Condition.Mode.Always"), 0);
+	modeCombo->addItem(obs_module_text("OmniBar.Condition.Mode.While"), 1);
+	modeCombo->addItem(obs_module_text("OmniBar.Condition.Mode.WhileNot"), 2);
+	layout->addWidget(modeCombo);
+
 	sourceCombo = new QComboBox();
-	sourceCombo->addItem(obs_module_text("OmniBar.Condition.Always"), static_cast<int>(ConditionSource::Always));
 	if (allowOwnAction)
 		sourceCombo->addItem(obs_module_text("OmniBar.Condition.OwnAction"),
 				     static_cast<int>(ConditionSource::OwnAction));
@@ -108,33 +139,37 @@ ConditionEditor::ConditionEditor(bool allowOwnAction, QWidget *parent) : QWidget
 			     static_cast<int>(ConditionSource::StudioMode));
 	layout->addWidget(sourceCombo, 1);
 
-	invertCheck = new QCheckBox(obs_module_text("OmniBar.Settings.Invert"));
-	layout->addWidget(invertCheck);
-
-	connect(sourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
-		// Inverting "always" would mean never, which is never useful.
-		invertCheck->setEnabled(sourceCombo->currentData().toInt() !=
-					static_cast<int>(ConditionSource::Always));
+	connect(modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+		sourceCombo->setVisible(modeCombo->currentData().toInt() != 0);
 		emit changed();
 	});
-	connect(invertCheck, &QCheckBox::toggled, this, &ConditionEditor::changed);
+	connect(sourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &ConditionEditor::changed);
 
-	invertCheck->setEnabled(false);
+	sourceCombo->setVisible(false);
 }
 
 void ConditionEditor::setCondition(const ActivationCondition &condition)
 {
+	QSignalBlocker modeBlocker(modeCombo);
+	QSignalBlocker sourceBlocker(sourceCombo);
+
 	int index = sourceCombo->findData(static_cast<int>(condition.source));
-	sourceCombo->setCurrentIndex(index >= 0 ? index : 0);
-	invertCheck->setChecked(condition.inverted);
-	invertCheck->setEnabled(condition.isSet());
+	bool set = condition.isSet() && index >= 0;
+
+	modeCombo->setCurrentIndex(!set ? 0 : (condition.inverted ? 2 : 1));
+	if (index >= 0)
+		sourceCombo->setCurrentIndex(index);
+	sourceCombo->setVisible(set);
 }
 
 ActivationCondition ConditionEditor::condition() const
 {
 	ActivationCondition result;
+	int mode = modeCombo->currentData().toInt();
+	if (mode == 0)
+		return result;
 	result.source = static_cast<ConditionSource>(sourceCombo->currentData().toInt());
-	result.inverted = result.isSet() && invertCheck->isChecked();
+	result.inverted = mode == 2;
 	return result;
 }
 
@@ -435,6 +470,10 @@ void ButtonEditDialog::setupSpacerUI()
 	spacerWidthSpin->setSuffix(" px");
 	form->addRow(obs_module_text("OmniBar.Settings.SpacerWidth"), spacerWidthSpin);
 
+	spacerExpandCheck = new QCheckBox(obs_module_text("OmniBar.Settings.SpacerExpand"));
+	spacerExpandCheck->setToolTip(obs_module_text("OmniBar.Settings.SpacerExpandHint"));
+	form->addRow(QString(), spacerExpandCheck);
+
 	showConditionEditor = new ConditionEditor(false);
 	form->addRow(obs_module_text("OmniBar.Settings.ShowCondition"), showConditionEditor);
 	mainLayout->addLayout(form);
@@ -476,10 +515,13 @@ void ButtonEditDialog::setupUI()
 	panes->addLayout(leftPane);
 
 	// Right pane: everything that can be configured.
+	// What the entry does comes first: the automatic icon and label are both
+	// derived from it, so it is the choice everything else follows.
 	tabs = new QTabWidget();
-	tabs->addTab(createAppearanceTab(), obs_module_text("OmniBar.Settings.TabAppearance"));
 	tabs->addTab(createActionTab(),
 		     obs_module_text(displayEntryMode ? "OmniBar.Settings.TabValue" : "OmniBar.Settings.TabAction"));
+	tabs->addTab(createAppearanceTab(), obs_module_text("OmniBar.Settings.TabAppearance"));
+	tabs->addTab(createVisibilityTab(), obs_module_text("OmniBar.Settings.TabVisibility"));
 	if (allowGroup) {
 		groupTabIndex = tabs->addTab(createGroupTab(), obs_module_text("OmniBar.Settings.TabGroup"));
 	}
@@ -594,6 +636,9 @@ void ButtonEditDialog::buildMetricCombo()
 		model->appendRow(item);
 	};
 
+	addHeader("OmniBar.MetricGroup.Status");
+	addEntry(DisplayMetric::Status);
+
 	addHeader("OmniBar.MetricGroup.Streaming");
 	addEntry(DisplayMetric::StreamTime);
 	addEntry(DisplayMetric::StreamBitrate);
@@ -622,7 +667,8 @@ void ButtonEditDialog::buildMetricCombo()
 	displayMetricCombo->setModel(model);
 	displayMetricCombo->view()->setMinimumWidth(240);
 	// Row zero is a heading, which is not something to sit on.
-	displayMetricCombo->setCurrentIndex(1);
+	displayMetricCombo->setCurrentIndex(
+		displayMetricCombo->findData(OmniBarMetrics::name(DisplayMetric::StreamTime)));
 }
 
 QWidget *ButtonEditDialog::createAppearanceTab()
@@ -689,10 +735,6 @@ QWidget *ButtonEditDialog::createAppearanceTab()
 	connect(tintIconCheck, &QCheckBox::toggled, this, &ButtonEditDialog::updateIconPreview);
 	form->addRow(QString(), tintIconCheck);
 
-	showConditionEditor = new ConditionEditor(true);
-	connect(showConditionEditor, &ConditionEditor::changed, this, &ButtonEditDialog::refreshPreview);
-	form->addRow(obs_module_text("OmniBar.Settings.ShowCondition"), showConditionEditor);
-
 	// Per-button accent override
 	QHBoxLayout *colorLayout = new QHBoxLayout();
 	customColorCheck = new QCheckBox(obs_module_text("OmniBar.Settings.UseCustomColor"));
@@ -731,6 +773,26 @@ QWidget *ButtonEditDialog::createAppearanceTab()
 	pulseHint->setWordWrap(true);
 	form->addRow(QString(), pulseHint);
 
+	return page;
+}
+
+// When the entry is on the bar at all. Behaviour rather than looks, so it has a
+// tab of its own instead of sitting among the colours.
+QWidget *ButtonEditDialog::createVisibilityTab()
+{
+	QWidget *page = new QWidget();
+	QVBoxLayout *layout = new QVBoxLayout(page);
+
+	QFormLayout *form = new QFormLayout();
+	showConditionEditor = new ConditionEditor(true);
+	connect(showConditionEditor, &ConditionEditor::changed, this, &ButtonEditDialog::refreshPreview);
+	form->addRow(obs_module_text("OmniBar.Settings.ShowCondition"), showConditionEditor);
+	layout->addLayout(form);
+
+	QLabel *hint = new QLabel(obs_module_text("OmniBar.Settings.ShowConditionHint"));
+	hint->setWordWrap(true);
+	layout->addWidget(hint);
+	layout->addStretch();
 	return page;
 }
 
@@ -780,6 +842,17 @@ QWidget *ButtonEditDialog::createActionTab()
 		connect(displayWidthSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
 			&ButtonEditDialog::refreshPreview);
 		displayForm->addRow(obs_module_text("OmniBar.Settings.DisplayWidth"), displayWidthSpin);
+
+		// Only some readings have a level worth warning about.
+		displayWarnCheck = new QCheckBox(obs_module_text("OmniBar.Settings.DisplayWarn"));
+		displayWarnCheck->setToolTip(obs_module_text("OmniBar.Settings.DisplayWarnHint"));
+		displayForm->addRow(QString(), displayWarnCheck);
+		auto syncWarn = [this]() {
+			displayWarnCheck->setEnabled(OmniBarMetrics::hasThresholds(
+				OmniBarMetrics::fromName(displayMetricCombo->currentData().toString())));
+		};
+		connect(displayMetricCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, syncWarn);
+		syncWarn();
 
 		layout->addLayout(displayForm);
 		layout->addStretch();
@@ -860,7 +933,8 @@ QWidget *ButtonEditDialog::createActionTab()
 	QFormLayout *filterForm = new QFormLayout(filterPage);
 	filterSourceCombo = new QComboBox();
 	filterCombo = new QComboBox();
-	connect(filterSourceCombo, &QComboBox::currentTextChanged, this, &ButtonEditDialog::onFilterSourceChanged);
+	connect(filterSourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+		[this]() { onFilterSourceChanged(filterSourceCombo->currentData().toString()); });
 	filterForm->addRow(obs_module_text("OmniBar.Settings.Source"), filterSourceCombo);
 	filterForm->addRow(obs_module_text("OmniBar.Settings.Filter"), filterCombo);
 	actionStack->addWidget(filterPage);
@@ -870,12 +944,22 @@ QWidget *ButtonEditDialog::createActionTab()
 	QFormLayout *visibilityForm = new QFormLayout(visibilityPage);
 	visibilitySceneCombo = new QComboBox();
 	visibilitySourceCombo = new QComboBox();
-	connect(visibilitySceneCombo, &QComboBox::currentTextChanged, this, &ButtonEditDialog::onSceneChanged);
+	connect(visibilitySceneCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+		[this]() { onSceneChanged(visibilitySceneCombo->currentData().toString()); });
 	visibilityForm->addRow(obs_module_text("OmniBar.Settings.Scene"), visibilitySceneCombo);
 	visibilityForm->addRow(obs_module_text("OmniBar.Settings.Source"), visibilitySourceCombo);
 	actionStack->addWidget(visibilityPage);
 
 	layout->addWidget(actionStack, 1);
+
+	QFormLayout *confirmForm = new QFormLayout();
+	confirmCombo = new QComboBox();
+	confirmCombo->addItem(obs_module_text("OmniBar.Confirm.FollowObs"), static_cast<int>(ConfirmMode::FollowObs));
+	confirmCombo->addItem(obs_module_text("OmniBar.Confirm.Always"), static_cast<int>(ConfirmMode::Always));
+	confirmCombo->addItem(obs_module_text("OmniBar.Confirm.Never"), static_cast<int>(ConfirmMode::Never));
+	confirmCombo->setToolTip(obs_module_text("OmniBar.Confirm.Hint"));
+	confirmForm->addRow(obs_module_text("OmniBar.Settings.Confirm"), confirmCombo);
+	layout->addLayout(confirmForm);
 	return page;
 }
 
@@ -963,6 +1047,7 @@ void ButtonEditDialog::populateFromConfig()
 	if (spacerMode) {
 		auto *spacerAction = dynamic_cast<SpacerAction *>(buttonConfig->action.get());
 		spacerWidthSpin->setValue(spacerAction ? spacerAction->getWidth() : 10);
+		spacerExpandCheck->setChecked(spacerAction && spacerAction->isExpanding());
 		return;
 	}
 
@@ -1041,9 +1126,14 @@ void ButtonEditDialog::populateFromConfig()
 			if (formatIndex >= 0)
 				displayClockFormatCombo->setCurrentIndex(formatIndex);
 			displayWidthSpin->setValue(display->getMinimumWidth());
+			displayWarnCheck->setChecked(display->getWarnColors());
 		}
 		return;
 	}
+
+	int confirmIndex = confirmCombo->findData(static_cast<int>(buttonConfig->confirmMode));
+	confirmCombo->setCurrentIndex(confirmIndex >= 0 ? confirmIndex : 0);
+	confirmCombo->setEnabled(buttonConfig->hasAction());
 
 	ActionType type = buttonConfig->action->getType();
 	int typeIndex = actionTypeCombo->findData(static_cast<int>(type));
@@ -1066,41 +1156,27 @@ void ButtonEditDialog::populateFromConfig()
 	case ActionType::SourceHotkey: {
 		auto *hotkeyAction = dynamic_cast<SourceHotkeyAction *>(buttonConfig->action.get());
 		if (hotkeyAction) {
-			int sourceIndex = hotkeySourceCombo->findData(hotkeyAction->getSourceName());
-			if (sourceIndex >= 0)
-				hotkeySourceCombo->setCurrentIndex(sourceIndex);
+			selectOrKeepMissing(hotkeySourceCombo, hotkeyAction->getSourceName());
 			populateHotkeys(hotkeyAction->getSourceName());
-			int hotkeyIndex = hotkeyCombo->findData(hotkeyAction->getHotkeyName());
-			if (hotkeyIndex >= 0)
-				hotkeyCombo->setCurrentIndex(hotkeyIndex);
+			selectOrKeepMissing(hotkeyCombo, hotkeyAction->getHotkeyName());
 		}
 		break;
 	}
 	case ActionType::SourceFilter: {
 		auto *filterAction = dynamic_cast<SourceFilterAction *>(buttonConfig->action.get());
 		if (filterAction) {
-			int sourceIndex = filterSourceCombo->findText(filterAction->getSourceName());
-			if (sourceIndex >= 0) {
-				filterSourceCombo->setCurrentIndex(sourceIndex);
-				populateFilters(filterAction->getSourceName());
-			}
-			int filterIndex = filterCombo->findText(filterAction->getFilterName());
-			if (filterIndex >= 0)
-				filterCombo->setCurrentIndex(filterIndex);
+			selectOrKeepMissing(filterSourceCombo, filterAction->getSourceName());
+			populateFilters(filterAction->getSourceName());
+			selectOrKeepMissing(filterCombo, filterAction->getFilterName());
 		}
 		break;
 	}
 	case ActionType::SourceVisibility: {
 		auto *visAction = dynamic_cast<SourceVisibilityAction *>(buttonConfig->action.get());
 		if (visAction) {
-			int sceneIndex = visibilitySceneCombo->findText(visAction->getSceneName());
-			if (sceneIndex >= 0) {
-				visibilitySceneCombo->setCurrentIndex(sceneIndex);
-				populateSceneItems(visAction->getSceneName());
-			}
-			int sourceIndex = visibilitySourceCombo->findText(visAction->getSourceName());
-			if (sourceIndex >= 0)
-				visibilitySourceCombo->setCurrentIndex(sourceIndex);
+			selectOrKeepMissing(visibilitySceneCombo, visAction->getSceneName());
+			populateSceneItems(visAction->getSceneName());
+			selectOrKeepMissing(visibilitySourceCombo, visAction->getSourceName());
 		}
 		break;
 	}
@@ -1117,7 +1193,8 @@ void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
 	target.showCondition = showConditionEditor->condition();
 
 	if (spacerMode) {
-		target.action = std::make_unique<SpacerAction>(spacerWidthSpin->value());
+		target.action =
+			std::make_unique<SpacerAction>(spacerWidthSpin->value(), spacerExpandCheck->isChecked());
 		return;
 	}
 
@@ -1150,6 +1227,7 @@ void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
 			displayWidthSpin->value());
 		display->setClockFormat(
 			OmniBarMetrics::clockFormatFromName(displayClockFormatCombo->currentData().toString()));
+		display->setWarnColors(displayWarnCheck->isChecked());
 		target.action = std::move(display);
 		return;
 	}
@@ -1168,6 +1246,8 @@ void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
 		}
 	}
 
+	target.confirmMode = static_cast<ConfirmMode>(confirmCombo->currentData().toInt());
+
 	ActionType type = static_cast<ActionType>(actionTypeCombo->currentData().toInt());
 	switch (type) {
 	case ActionType::None:
@@ -1183,12 +1263,13 @@ void ButtonEditDialog::updateConfigFromUI(ButtonConfig &target)
 								     hotkeyCombo->currentData().toString());
 		break;
 	case ActionType::SourceFilter:
-		target.action = std::make_unique<SourceFilterAction>(filterSourceCombo->currentText(),
-								     filterCombo->currentText());
+		target.action = std::make_unique<SourceFilterAction>(filterSourceCombo->currentData().toString(),
+								     filterCombo->currentData().toString());
 		break;
 	case ActionType::SourceVisibility:
-		target.action = std::make_unique<SourceVisibilityAction>(visibilitySceneCombo->currentText(),
-									 visibilitySourceCombo->currentText());
+		target.action =
+			std::make_unique<SourceVisibilityAction>(visibilitySceneCombo->currentData().toString(),
+								 visibilitySourceCombo->currentData().toString());
 		break;
 	case ActionType::Spacer:
 		target.action = std::make_unique<SpacerAction>(10);
@@ -1223,10 +1304,12 @@ void ButtonEditDialog::onActionTypeChanged(int index)
 	actionStack->setCurrentIndex(index);
 	if (allowGroup && groupCheck)
 		onGroupToggled(groupCheck->isChecked());
-	// Nothing to pulse to without an action of its own.
+	// Nothing to pulse to, or to ask about, without an action of its own.
+	bool hasAction = static_cast<ActionType>(actionTypeCombo->currentData().toInt()) != ActionType::None;
 	if (pulseCheck)
-		pulseCheck->setEnabled(static_cast<ActionType>(actionTypeCombo->currentData().toInt()) !=
-				       ActionType::None);
+		pulseCheck->setEnabled(hasAction);
+	if (confirmCombo)
+		confirmCombo->setEnabled(hasAction);
 	refreshPreview();
 }
 
@@ -1461,7 +1544,7 @@ void ButtonEditDialog::populateSources()
 			if (name) {
 				QString sourceName = QString::fromUtf8(name);
 				dialog->hotkeySourceCombo->addItem(sourceName, sourceName);
-				dialog->filterSourceCombo->addItem(sourceName);
+				dialog->filterSourceCombo->addItem(sourceName, sourceName);
 			}
 			return true;
 		},
@@ -1475,7 +1558,7 @@ void ButtonEditDialog::populateSources()
 			if (name) {
 				QString sourceName = QString::fromUtf8(name);
 				dialog->hotkeySourceCombo->addItem(sourceName, sourceName);
-				dialog->filterSourceCombo->addItem(sourceName);
+				dialog->filterSourceCombo->addItem(sourceName, sourceName);
 			}
 			return true;
 		},
@@ -1493,7 +1576,7 @@ void ButtonEditDialog::populateScenes()
 	for (size_t i = 0; i < scenes.sources.num; i++) {
 		const char *name = obs_source_get_name(scenes.sources.array[i]);
 		if (name) {
-			visibilitySceneCombo->addItem(QString::fromUtf8(name));
+			visibilitySceneCombo->addItem(QString::fromUtf8(name), QString::fromUtf8(name));
 		}
 	}
 	obs_frontend_source_list_free(&scenes);
@@ -1515,7 +1598,7 @@ void ButtonEditDialog::populateFilters(const QString &sourceName)
 			QComboBox *combo = static_cast<QComboBox *>(data);
 			const char *name = obs_source_get_name(filter);
 			if (name) {
-				combo->addItem(QString::fromUtf8(name));
+				combo->addItem(QString::fromUtf8(name), QString::fromUtf8(name));
 			}
 		},
 		filterCombo);
@@ -1546,7 +1629,7 @@ void ButtonEditDialog::populateSceneItems(const QString &sceneName)
 			obs_source_t *source = obs_sceneitem_get_source(item);
 			const char *name = obs_source_get_name(source);
 			if (name) {
-				combo->addItem(QString::fromUtf8(name));
+				combo->addItem(QString::fromUtf8(name), QString::fromUtf8(name));
 			}
 			return true;
 		},
@@ -1610,7 +1693,7 @@ OmniBarConfig::~OmniBarConfig()
 		instance = nullptr;
 }
 
-void OmniBarConfig::showDialog()
+void OmniBarConfig::showDialog(const QString &editId)
 {
 	if (!instance) {
 		QWidget *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
@@ -1620,6 +1703,21 @@ void OmniBarConfig::showDialog()
 	instance->show();
 	instance->raise();
 	instance->activateWindow();
+
+	if (!editId.isEmpty())
+		instance->editEntry(editId);
+}
+
+void OmniBarConfig::editEntry(const QString &id)
+{
+	for (QTreeWidgetItemIterator it(buttonTree); *it; ++it) {
+		if ((*it)->data(0, kConfigIdRole).toString() == id) {
+			buttonTree->setCurrentItem(*it);
+			buttonTree->scrollToItem(*it);
+			onEditButton();
+			return;
+		}
+	}
 }
 
 void OmniBarConfig::dockPositionChanged(DockPosition position)
@@ -1627,9 +1725,39 @@ void OmniBarConfig::dockPositionChanged(DockPosition position)
 	if (!instance || !instance->dockPositionCombo)
 		return;
 
+	// The move is already saved, so this is not an edit to keep.
+	QSignalBlocker blocker(instance->dockPositionCombo);
 	int index = instance->dockPositionCombo->findData(static_cast<int>(position));
 	if (index >= 0)
 		instance->dockPositionCombo->setCurrentIndex(index);
+}
+
+void OmniBarConfig::markDirty()
+{
+	setDirty(true);
+}
+
+void OmniBarConfig::setDirty(bool value)
+{
+	dirty = value;
+	if (unsavedLabel)
+		unsavedLabel->setVisible(dirty);
+}
+
+void OmniBarConfig::reject()
+{
+	if (dirty) {
+		QMessageBox::StandardButton answer = QMessageBox::question(
+			this, obs_module_text("OmniBar.Settings.Title"),
+			obs_module_text("OmniBar.Settings.ConfirmDiscard"),
+			QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+		if (answer == QMessageBox::Cancel)
+			return;
+		if (answer == QMessageBox::Save)
+			saveSettings();
+	}
+
+	QDialog::reject();
 }
 
 void OmniBarConfig::setupUI()
@@ -1641,12 +1769,19 @@ void OmniBarConfig::setupUI()
 	tabs->addTab(createAppearanceTab(), obs_module_text("OmniBar.Settings.TabAppearance"));
 	mainLayout->addWidget(tabs, 1);
 
+	QHBoxLayout *footer = new QHBoxLayout();
+	unsavedLabel = new QLabel(obs_module_text("OmniBar.Settings.Unsaved"));
+	unsavedLabel->setVisible(false);
+	footer->addWidget(unsavedLabel);
+	footer->addStretch();
+
 	QDialogButtonBox *buttonBox =
 		new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Apply);
 	connect(buttonBox, &QDialogButtonBox::accepted, this, &OmniBarConfig::onOk);
 	connect(buttonBox, &QDialogButtonBox::rejected, this, &OmniBarConfig::onCancel);
 	connect(buttonBox->button(QDialogButtonBox::Apply), &QPushButton::clicked, this, &OmniBarConfig::onApply);
-	mainLayout->addWidget(buttonBox);
+	footer->addWidget(buttonBox);
+	mainLayout->addLayout(footer);
 }
 
 QWidget *OmniBarConfig::createButtonsTab()
@@ -1678,6 +1813,17 @@ QWidget *OmniBarConfig::createButtonsTab()
 	connect(moveUpButton, &QPushButton::clicked, this, &OmniBarConfig::onMoveUp);
 	connect(moveDownButton, &QPushButton::clicked, this, &OmniBarConfig::onMoveDown);
 
+	// The usual list keys: Delete removes, F2 or Enter edits, Ctrl+D copies.
+	auto addShortcut = [this](const QKeySequence &keys, void (OmniBarConfig::*slot)()) {
+		QShortcut *shortcut = new QShortcut(keys, buttonTree);
+		shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+		connect(shortcut, &QShortcut::activated, this, slot);
+	};
+	addShortcut(QKeySequence::Delete, &OmniBarConfig::onRemoveButton);
+	addShortcut(QKeySequence(Qt::Key_F2), &OmniBarConfig::onEditButton);
+	addShortcut(QKeySequence(Qt::Key_Return), &OmniBarConfig::onEditButton);
+	addShortcut(QKeySequence(Qt::CTRL | Qt::Key_D), &OmniBarConfig::onDuplicateButton);
+
 	listButtonLayout->addWidget(addButton);
 	listButtonLayout->addWidget(editButton);
 	listButtonLayout->addWidget(duplicateButton);
@@ -1696,6 +1842,8 @@ QWidget *OmniBarConfig::createButtonsTab()
 	dockPositionCombo->addItem(obs_module_text("OmniBar.Position.Right"), static_cast<int>(DockPosition::Right));
 	dockPositionCombo->addItem(obs_module_text("OmniBar.Position.None"), static_cast<int>(DockPosition::None));
 	dockForm->addRow(obs_module_text("OmniBar.Settings.DockPosition"), dockPositionCombo);
+	connect(dockPositionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+		&OmniBarConfig::markDirty);
 
 	layout->addWidget(dockGroup);
 
@@ -1704,17 +1852,32 @@ QWidget *OmniBarConfig::createButtonsTab()
 
 QWidget *OmniBarConfig::createAppearanceTab()
 {
+	// Long enough to need scrolling on a small screen, so the page scrolls
+	// rather than pushing the dialog off the bottom of it.
+	QScrollArea *scroll = new QScrollArea();
+	scroll->setWidgetResizable(true);
+	scroll->setFrameShape(QFrame::NoFrame);
+
 	QWidget *page = new QWidget();
 	QVBoxLayout *layout = new QVBoxLayout(page);
+	scroll->setWidget(page);
 
 	QFormLayout *presetForm = new QFormLayout();
 	presetCombo = new QComboBox();
-	presetCombo->addItem(obs_module_text("OmniBar.Preset.ObsNative"), static_cast<int>(StylePreset::ObsNative));
-	presetCombo->addItem(obs_module_text("OmniBar.Preset.Compact"), static_cast<int>(StylePreset::Compact));
-	presetCombo->addItem(obs_module_text("OmniBar.Preset.ModernRounded"),
-			     static_cast<int>(StylePreset::ModernRounded));
-	presetCombo->addItem(obs_module_text("OmniBar.Preset.NeonAccent"), static_cast<int>(StylePreset::NeonAccent));
-	presetCombo->addItem(obs_module_text("OmniBar.Preset.Custom"), static_cast<int>(StylePreset::Custom));
+	const std::pair<StylePreset, const char *> presets[] = {
+		{StylePreset::ObsNative, "OmniBar.Preset.ObsNative"},
+		{StylePreset::Broadcast, "OmniBar.Preset.Broadcast"},
+		{StylePreset::Capsule, "OmniBar.Preset.Capsule"},
+		{StylePreset::MonoLine, "OmniBar.Preset.MonoLine"},
+		{StylePreset::Compact, "OmniBar.Preset.Compact"},
+		{StylePreset::ModernRounded, "OmniBar.Preset.ModernRounded"},
+		{StylePreset::NeonAccent, "OmniBar.Preset.NeonAccent"},
+		{StylePreset::Phosphor, "OmniBar.Preset.Phosphor"},
+		{StylePreset::HighContrast, "OmniBar.Preset.HighContrast"},
+		{StylePreset::Daylight, "OmniBar.Preset.Daylight"},
+		{StylePreset::Custom, "OmniBar.Preset.Custom"}};
+	for (const auto &preset : presets)
+		presetCombo->addItem(obs_module_text(preset.second), static_cast<int>(preset.first));
 	connect(presetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
 		&OmniBarConfig::onPresetChanged);
 	presetForm->addRow(obs_module_text("OmniBar.Settings.Preset"), presetCombo);
@@ -1727,23 +1890,36 @@ QWidget *OmniBarConfig::createAppearanceTab()
 	previewLayout->setContentsMargins(8, 8, 8, 8);
 	previewLayout->setAlignment(Qt::AlignLeft);
 
+	// A status chip, then one sample of each state colour, so a theme can be
+	// judged on how it shows going live as well as how it looks at rest.
+	auto status = std::make_shared<ButtonConfig>();
+	status->action = std::make_unique<DisplayAction>(DisplayMetric::Status);
+	status->displayMode = ButtonDisplayMode::TextOnly;
+	OmniBarDisplay *statusPreview = new OmniBarDisplay(status, stylePreviewBar);
+	statusPreview->setPreviewMode(true);
+	previewLayout->addWidget(statusPreview);
+
 	struct SampleSpec {
 		FrontendActionType action;
 		bool checked;
+		bool pulse;
 	};
-	const SampleSpec samples[] = {{FrontendActionType::ToggleStreaming, false},
-				      {FrontendActionType::ToggleRecording, true},
-				      {FrontendActionType::ToggleStudioMode, false}};
+	const SampleSpec samples[] = {{FrontendActionType::ToggleStreaming, true, false},
+				      {FrontendActionType::ToggleRecording, true, true},
+				      {FrontendActionType::TogglePauseRecording, false, false},
+				      {FrontendActionType::ToggleReplayBuffer, true, false},
+				      {FrontendActionType::ToggleVirtualCam, false, false},
+				      {FrontendActionType::ToggleStudioMode, false, false}};
 
 	for (const auto &sample : samples) {
 		auto config = std::make_shared<ButtonConfig>();
 		config->action = std::make_unique<FrontendAction>(sample.action);
-		// The active sample pulses, so the speed and intensity below can be
-		// judged by eye rather than by number.
-		config->pulseWhenActive = sample.checked;
+		// The pulsing sample lets the speed and intensity below be judged by
+		// eye rather than by number.
+		config->pulseWhenActive = sample.pulse;
 
-		// Real bar buttons, so the preview breathes exactly as the bar
-		// will. The button keeps the config alive.
+		// Real bar buttons, so the preview draws exactly as the bar will.
+		// The button keeps the config alive.
 		OmniBarButton *button = new OmniBarButton(config, stylePreviewBar);
 		button->setPreviewMode(true);
 		button->setChecked(sample.checked);
@@ -1752,6 +1928,74 @@ QWidget *OmniBarConfig::createAppearanceTab()
 		stylePreviewButtons.append(button);
 	}
 	layout->addWidget(stylePreviewBar);
+
+	// Colour swatches. Theme colours turn custom colours on when picked,
+	// since they are otherwise ignored; state and warning colours apply
+	// either way.
+	auto addColor = [this](QGridLayout *grid, QPushButton **target, const char *labelKey, QColor BarStyle::*member,
+			       int row, int column, bool themeColor) {
+		grid->addWidget(new QLabel(obs_module_text(labelKey)), row, column * 2);
+		QPushButton *swatch = new QPushButton();
+		connect(swatch, &QPushButton::clicked, this, [this, swatch, member, themeColor]() {
+			QColor current = workingStyle.*member;
+			QColor chosen = QColorDialog::getColor(current.isValid() ? current : QColor(Qt::white), this,
+							       obs_module_text("OmniBar.Settings.Colors"),
+							       QColorDialog::ShowAlphaChannel);
+			if (!chosen.isValid())
+				return;
+			workingStyle.*member = chosen;
+			setColorSwatch(swatch, chosen);
+			if (themeColor && !useCustomColorsCheck->isChecked()) {
+				updatingStyleWidgets = true;
+				useCustomColorsCheck->setChecked(true);
+				updatingStyleWidgets = false;
+				workingStyle.useCustomColors = true;
+				colorGrid->setEnabled(true);
+			}
+			onStyleValueChanged();
+		});
+		grid->addWidget(swatch, row, column * 2 + 1);
+		if (target)
+			*target = swatch;
+		colorSwatches.append({swatch, member});
+	};
+
+	// Active state
+	QGroupBox *activeGroup = new QGroupBox(obs_module_text("OmniBar.Settings.ActiveGroup"));
+	QVBoxLayout *activeLayout = new QVBoxLayout(activeGroup);
+	QFormLayout *activeForm = new QFormLayout();
+	indicatorCombo = new QComboBox();
+	indicatorCombo->addItem(obs_module_text("OmniBar.Indicator.Fill"), static_cast<int>(ActiveIndicator::Fill));
+	indicatorCombo->addItem(obs_module_text("OmniBar.Indicator.Underline"),
+				static_cast<int>(ActiveIndicator::Underline));
+	indicatorCombo->addItem(obs_module_text("OmniBar.Indicator.Dot"), static_cast<int>(ActiveIndicator::Dot));
+	indicatorCombo->addItem(obs_module_text("OmniBar.Indicator.Ring"), static_cast<int>(ActiveIndicator::Ring));
+	connect(indicatorCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+		&OmniBarConfig::onStyleValueChanged);
+	activeForm->addRow(obs_module_text("OmniBar.Settings.Indicator"), indicatorCombo);
+	activeLayout->addLayout(activeForm);
+
+	useStateColorsCheck = new QCheckBox(obs_module_text("OmniBar.Settings.UseStateColors"));
+	useStateColorsCheck->setToolTip(obs_module_text("OmniBar.Settings.UseStateColorsHint"));
+	connect(useStateColorsCheck, &QCheckBox::toggled, this, [this](bool enabled) {
+		stateColorGrid->setEnabled(enabled);
+		onStyleValueChanged();
+	});
+	activeLayout->addWidget(useStateColorsCheck);
+
+	stateColorGrid = new QWidget();
+	QGridLayout *stateGrid = new QGridLayout(stateColorGrid);
+	stateGrid->setContentsMargins(0, 0, 0, 0);
+	addColor(stateGrid, nullptr, "OmniBar.Settings.StateLive", &BarStyle::stateLive, 0, 0, false);
+	addColor(stateGrid, nullptr, "OmniBar.Settings.StateRecording", &BarStyle::stateRecording, 0, 1, false);
+	addColor(stateGrid, nullptr, "OmniBar.Settings.StatePaused", &BarStyle::statePaused, 1, 0, false);
+	addColor(stateGrid, nullptr, "OmniBar.Settings.StateReplay", &BarStyle::stateReplay, 1, 1, false);
+	addColor(stateGrid, nullptr, "OmniBar.Settings.StateVirtualCam", &BarStyle::stateVirtualCam, 2, 0, false);
+	addColor(stateGrid, nullptr, "OmniBar.Settings.StateStudio", &BarStyle::stateStudio, 2, 1, false);
+	addColor(stateGrid, nullptr, "OmniBar.Settings.WarningColor", &BarStyle::warningColor, 3, 0, false);
+	addColor(stateGrid, nullptr, "OmniBar.Settings.CriticalColor", &BarStyle::criticalColor, 3, 1, false);
+	activeLayout->addWidget(stateColorGrid);
+	layout->addWidget(activeGroup);
 
 	// Metrics
 	QGroupBox *metricsGroup = new QGroupBox(obs_module_text("OmniBar.Settings.Metrics"));
@@ -1806,51 +2050,19 @@ QWidget *OmniBarConfig::createAppearanceTab()
 	QGridLayout *grid = new QGridLayout(colorGrid);
 	grid->setContentsMargins(0, 0, 0, 0);
 
-	auto addColor = [&](QPushButton *&target, const char *labelKey, QColor BarStyle::*member, int row, int column) {
-		grid->addWidget(new QLabel(obs_module_text(labelKey)), row, column * 2);
-		QPushButton *swatch = new QPushButton();
-		connect(swatch, &QPushButton::clicked, this,
-			[this, swatch, member]() { pickColor(workingStyle.*member, swatch); });
-		grid->addWidget(swatch, row, column * 2 + 1);
-		target = swatch;
-	};
-
-	addColor(barBackgroundButton, "OmniBar.Settings.BarBackground", &BarStyle::barBackground, 0, 0);
-	addColor(buttonBackgroundButton, "OmniBar.Settings.ButtonBackground", &BarStyle::buttonBackground, 0, 1);
-	addColor(buttonHoverButton, "OmniBar.Settings.ButtonHover", &BarStyle::buttonHover, 1, 0);
-	addColor(buttonCheckedButton, "OmniBar.Settings.ButtonChecked", &BarStyle::buttonChecked, 1, 1);
-	addColor(buttonBorderButton, "OmniBar.Settings.ButtonBorder", &BarStyle::buttonBorder, 2, 0);
-	addColor(textColorButton, "OmniBar.Settings.TextColor", &BarStyle::textColor, 2, 1);
+	addColor(grid, &barBackgroundButton, "OmniBar.Settings.BarBackground", &BarStyle::barBackground, 0, 0, true);
+	addColor(grid, &buttonBackgroundButton, "OmniBar.Settings.ButtonBackground", &BarStyle::buttonBackground, 0, 1,
+		 true);
+	addColor(grid, &buttonHoverButton, "OmniBar.Settings.ButtonHover", &BarStyle::buttonHover, 1, 0, true);
+	addColor(grid, &buttonCheckedButton, "OmniBar.Settings.ButtonChecked", &BarStyle::buttonChecked, 1, 1, true);
+	addColor(grid, &buttonBorderButton, "OmniBar.Settings.ButtonBorder", &BarStyle::buttonBorder, 2, 0, true);
+	addColor(grid, &textColorButton, "OmniBar.Settings.TextColor", &BarStyle::textColor, 2, 1, true);
 
 	colorLayout->addWidget(colorGrid);
 	layout->addWidget(colorGroup);
 	layout->addStretch();
 
-	return page;
-}
-
-void OmniBarConfig::pickColor(QColor &target, QPushButton *swatch)
-{
-	QColor chosen = QColorDialog::getColor(target.isValid() ? target : QColor(Qt::white), this,
-					       obs_module_text("OmniBar.Settings.Colors"),
-					       QColorDialog::ShowAlphaChannel);
-	if (!chosen.isValid())
-		return;
-
-	target = chosen;
-	setColorSwatch(swatch, chosen);
-
-	// Hand-picked colours are only used when the bar is not tracking the
-	// OBS theme, so turn that on rather than silently ignoring the choice.
-	if (!useCustomColorsCheck->isChecked()) {
-		updatingStyleWidgets = true;
-		useCustomColorsCheck->setChecked(true);
-		updatingStyleWidgets = false;
-		workingStyle.useCustomColors = true;
-		colorGrid->setEnabled(true);
-	}
-
-	onStyleValueChanged();
+	return scroll;
 }
 
 void OmniBarConfig::loadSettings()
@@ -1869,6 +2081,7 @@ void OmniBarConfig::loadSettings()
 
 	workingStyle = SettingsManager::getStyle();
 	updateStyleWidgets();
+	setDirty(false);
 }
 
 void OmniBarConfig::saveSettings()
@@ -1879,6 +2092,7 @@ void OmniBarConfig::saveSettings()
 	SettingsManager::setDockPosition(static_cast<DockPosition>(dockPositionCombo->currentData().toInt()));
 	SettingsManager::setStyle(workingStyle);
 	SettingsManager::save();
+	setDirty(false);
 
 	if (OmniBar::getInstance()) {
 		OmniBar::getInstance()->refreshFromConfiguration();
@@ -1894,6 +2108,15 @@ QTreeWidgetItem *OmniBarConfig::createTreeItem(const std::shared_ptr<ButtonConfi
 	item->setData(0, kConfigIdRole, config->id);
 	item->setData(0, kConfigIsGroupRole, config->isGroup);
 	item->setData(0, kConfigIsDecorationRole, config->isDecoration());
+
+	// A button whose source has gone stays in the list, saying so, rather
+	// than looking fine and never appearing on the bar.
+	if (config->targetMissing()) {
+		item->setText(1, QString::fromUtf8(obs_module_text("OmniBar.Settings.TargetMissing"))
+					 .arg(config->summaryText()));
+		item->setForeground(1, QBrush(QColor(214, 138, 0)));
+		item->setToolTip(1, obs_module_text("OmniBar.Settings.MissingHint"));
+	}
 
 	Qt::ItemFlags flags = Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled;
 	// Only groups accept a drop, which is what caps nesting at one level.
@@ -1990,6 +2213,7 @@ void OmniBarConfig::onTreeReordered()
 {
 	rebuildModelFromTree();
 	populateButtonTree();
+	markDirty();
 }
 
 void OmniBarConfig::addNewEntry(std::shared_ptr<ButtonConfig> config)
@@ -2007,6 +2231,7 @@ void OmniBarConfig::addNewEntry(std::shared_ptr<ButtonConfig> config)
 			int row = parentConfig->children.indexOf(currentConfig);
 			parentConfig->children.insert(row >= 0 ? row + 1 : parentConfig->children.size(), config);
 			populateButtonTree();
+			markDirty();
 			return;
 		}
 	}
@@ -2014,6 +2239,7 @@ void OmniBarConfig::addNewEntry(std::shared_ptr<ButtonConfig> config)
 	int row = currentConfig ? workingButtons.indexOf(currentConfig) : -1;
 	workingButtons.insert(row >= 0 ? row + 1 : workingButtons.size(), config);
 	populateButtonTree();
+	markDirty();
 }
 
 void OmniBarConfig::onAddButton()
@@ -2023,6 +2249,7 @@ void OmniBarConfig::onAddButton()
 	QAction *groupAction = menu.addAction(obs_module_text("OmniBar.Settings.AddGroup"));
 	QAction *displayAction = menu.addAction(obs_module_text("OmniBar.Settings.AddDisplay"));
 	QAction *spacerAction = menu.addAction(obs_module_text("OmniBar.Settings.AddSpacer"));
+	QAction *flexibleAction = menu.addAction(obs_module_text("OmniBar.Settings.AddFlexibleSpace"));
 	QAction *dividerAction = menu.addAction(obs_module_text("OmniBar.Settings.AddDivider"));
 
 	QAction *chosen = menu.exec(addButton->mapToGlobal(QPoint(0, addButton->height())));
@@ -2031,9 +2258,9 @@ void OmniBarConfig::onAddButton()
 
 	auto config = std::make_shared<ButtonConfig>();
 
-	if (chosen == spacerAction || chosen == dividerAction || chosen == displayAction) {
-		if (chosen == spacerAction) {
-			config->action = std::make_unique<SpacerAction>(10);
+	if (chosen == spacerAction || chosen == flexibleAction || chosen == dividerAction || chosen == displayAction) {
+		if (chosen == spacerAction || chosen == flexibleAction) {
+			config->action = std::make_unique<SpacerAction>(10, chosen == flexibleAction);
 		} else if (chosen == dividerAction) {
 			config->action = std::make_unique<DividerAction>();
 		} else {
@@ -2082,6 +2309,7 @@ void OmniBarConfig::onEditButton()
 		return;
 
 	populateButtonTree();
+	markDirty();
 }
 
 void OmniBarConfig::onDuplicateButton()
@@ -2125,6 +2353,7 @@ void OmniBarConfig::onRemoveButton()
 	}
 
 	populateButtonTree();
+	markDirty();
 }
 
 void OmniBarConfig::onMoveUp()
@@ -2145,8 +2374,10 @@ void OmniBarConfig::onMoveUp()
 	}
 
 	int row = list->indexOf(config);
-	if (row > 0)
+	if (row > 0) {
 		list->move(row, row - 1);
+		markDirty();
+	}
 
 	populateButtonTree();
 }
@@ -2169,8 +2400,10 @@ void OmniBarConfig::onMoveDown()
 	}
 
 	int row = list->indexOf(config);
-	if (row >= 0 && row < list->size() - 1)
+	if (row >= 0 && row < list->size() - 1) {
 		list->move(row, row + 1);
+		markDirty();
+	}
 
 	populateButtonTree();
 }
@@ -2197,6 +2430,7 @@ void OmniBarConfig::onPresetChanged(int index)
 	// A preset fills in every value; the user can then edit any of them.
 	workingStyle = BarStyle::fromPreset(preset);
 	updateStyleWidgets();
+	markDirty();
 }
 
 void OmniBarConfig::onStyleValueChanged()
@@ -2212,6 +2446,9 @@ void OmniBarConfig::onStyleValueChanged()
 	workingStyle.pulsePeriod = pulsePeriodSpin->value();
 	workingStyle.pulseIntensity = pulseIntensitySpin->value();
 	workingStyle.useCustomColors = useCustomColorsCheck->isChecked();
+	workingStyle.indicator = static_cast<ActiveIndicator>(indicatorCombo->currentData().toInt());
+	workingStyle.useStateColors = useStateColorsCheck->isChecked();
+	markDirty();
 
 	// Editing any value means this is no longer one of the named looks.
 	if (workingStyle != BarStyle::fromPreset(workingStyle.preset)) {
@@ -2252,12 +2489,14 @@ void OmniBarConfig::updateStyleWidgets()
 	useCustomColorsCheck->setChecked(workingStyle.useCustomColors);
 	colorGrid->setEnabled(workingStyle.useCustomColors);
 
-	setColorSwatch(barBackgroundButton, workingStyle.barBackground);
-	setColorSwatch(buttonBackgroundButton, workingStyle.buttonBackground);
-	setColorSwatch(buttonHoverButton, workingStyle.buttonHover);
-	setColorSwatch(buttonCheckedButton, workingStyle.buttonChecked);
-	setColorSwatch(buttonBorderButton, workingStyle.buttonBorder);
-	setColorSwatch(textColorButton, workingStyle.textColor);
+	int indicatorIndex = indicatorCombo->findData(static_cast<int>(workingStyle.indicator));
+	if (indicatorIndex >= 0)
+		indicatorCombo->setCurrentIndex(indicatorIndex);
+	useStateColorsCheck->setChecked(workingStyle.useStateColors);
+	stateColorGrid->setEnabled(workingStyle.useStateColors);
+
+	for (const auto &swatch : colorSwatches)
+		setColorSwatch(swatch.first, workingStyle.*(swatch.second));
 
 	updatingStyleWidgets = false;
 
@@ -2279,6 +2518,8 @@ void OmniBarConfig::refreshStylePreview()
 	// stand for the style, not for what OBS happens to be doing.
 	for (auto *button : stylePreviewButtons)
 		button->applyStyle(workingStyle);
+	for (auto *display : stylePreviewBar->findChildren<OmniBarDisplay *>())
+		display->applyStyle(workingStyle);
 }
 
 void OmniBarConfig::onApply()

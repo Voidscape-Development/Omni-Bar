@@ -38,6 +38,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QHash>
 #include <QStylePainter>
 #include <QStyleOptionToolButton>
+#include <QMessageBox>
+#include <QEvent>
 
 OmniBar *OmniBar::instance = nullptr;
 
@@ -78,7 +80,29 @@ static QString findBundledIcon(const QString &name)
 // Bundled icons are drawn with a currentColor token. Qt's SVG renderer does not
 // resolve it, so it is substituted before the bytes reach the image plugin -
 // which also lets one file serve every theme and custom text colour.
-static QIcon loadIcon(const QString &path, const QColor &tint, int size, bool recolor)
+static QPixmap renderTinted(const QString &path, const QColor &tint, int pixels, qreal ratio)
+{
+	QFile file(path);
+	if (!file.open(QIODevice::ReadOnly))
+		return QPixmap();
+
+	QByteArray data = file.readAll();
+	data.replace("currentColor", tint.name(QColor::HexRgb).toUtf8());
+
+	QBuffer buffer(&data);
+	QImageReader reader(&buffer, "svg");
+	reader.setScaledSize(QSize(pixels, pixels));
+
+	QImage image = reader.read();
+	if (image.isNull())
+		return QPixmap();
+
+	QPixmap pixmap = QPixmap::fromImage(image);
+	pixmap.setDevicePixelRatio(ratio);
+	return pixmap;
+}
+
+static QIcon loadIcon(const QString &path, const QColor &tint, int size, bool recolor, const QColor &activeTint)
 {
 	if (path.isEmpty())
 		return QIcon();
@@ -90,27 +114,24 @@ static QIcon loadIcon(const QString &path, const QColor &tint, int size, bool re
 	int pixels = qMax(1, qRound(size * ratio));
 
 	static QHash<QString, QIcon> cache;
-	QString key = QString("%1|%2|%3").arg(path, tint.name(QColor::HexArgb)).arg(pixels);
+	QString key = QString("%1|%2|%3|%4")
+			      .arg(path, tint.name(QColor::HexArgb),
+				   activeTint.isValid() ? activeTint.name(QColor::HexArgb) : QString())
+			      .arg(pixels);
 	auto cached = cache.constFind(key);
 	if (cached != cache.constEnd())
 		return *cached;
 
 	QIcon icon;
-	QFile file(path);
-	if (file.open(QIODevice::ReadOnly)) {
-		QByteArray data = file.readAll();
-		data.replace("currentColor", tint.name(QColor::HexRgb).toUtf8());
-
-		QBuffer buffer(&data);
-		QImageReader reader(&buffer, "svg");
-		reader.setScaledSize(QSize(pixels, pixels));
-
-		QImage image = reader.read();
-		if (!image.isNull()) {
-			QPixmap pixmap = QPixmap::fromImage(image);
-			pixmap.setDevicePixelRatio(ratio);
-			icon = QIcon(pixmap);
-		}
+	QPixmap resting = renderTinted(path, tint, pixels, ratio);
+	if (!resting.isNull()) {
+		icon.addPixmap(resting, QIcon::Normal, QIcon::Off);
+		// The active rendering sits under the On state, which is the one
+		// a checked tool button draws.
+		QPixmap active = activeTint.isValid() && activeTint != tint
+					 ? renderTinted(path, activeTint, pixels, ratio)
+					 : QPixmap();
+		icon.addPixmap(active.isNull() ? resting : active, QIcon::Normal, QIcon::On);
 	}
 
 	// If anything above failed, let Qt load the file untouched.
@@ -203,7 +224,10 @@ static QString defaultIconName(const std::shared_ptr<ButtonConfig> &config)
 	return QString();
 }
 
-QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config, const QColor &tint, int size)
+const char *const kOmniBarEntryIdProperty = "omniBarEntryId";
+
+QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config, const QColor &tint, int size,
+			   const QColor &activeTint)
 {
 	if (!config)
 		return QIcon();
@@ -215,16 +239,16 @@ QIcon omniBarIconForConfig(const std::shared_ptr<ButtonConfig> &config, const QC
 	if (!iconPath.isEmpty()) {
 		if (iconPath.contains('/') || iconPath.contains('\\')) {
 			if (QFile::exists(iconPath))
-				return loadIcon(iconPath, tint, size, config->tintIcon);
+				return loadIcon(iconPath, tint, size, config->tintIcon, activeTint);
 		} else {
 			QString bundled = findBundledIcon(iconPath);
 			if (!bundled.isEmpty())
-				return loadIcon(bundled, tint, size, true);
+				return loadIcon(bundled, tint, size, true, activeTint);
 		}
 	}
 
 	QString fallback = findBundledIcon(defaultIconName(config));
-	return fallback.isEmpty() ? QIcon() : loadIcon(fallback, tint, size, true);
+	return fallback.isEmpty() ? QIcon() : loadIcon(fallback, tint, size, true, activeTint);
 }
 
 // Space between a stacked label and the icon it sits over. Shared by the height
@@ -240,7 +264,15 @@ static void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_
 	if (!button || !config)
 		return;
 
-	button->setIcon(omniBarIconForConfig(config, style.effectiveTextColor(), style.iconSize));
+	// The active icon contrasts with a fill, or takes the active colour
+	// itself when the indicator leaves the button's background alone. A
+	// readout is never active, so it has no second rendering.
+	QColor activeTint;
+	if (!config->isDisplay()) {
+		QColor accent = config->activeColor(style);
+		activeTint = style.indicator == ActiveIndicator::Fill ? omniBarContrastingColor(accent) : accent;
+	}
+	button->setIcon(omniBarIconForConfig(config, style.effectiveTextColor(), style.iconSize, activeTint));
 	button->setIconSize(QSize(style.iconSize, style.iconSize));
 
 	QString label = config->label;
@@ -306,10 +338,15 @@ static void omniBarApplyButtonAppearance(QToolButton *button, const std::shared_
 		button->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 	}
 
+	QString sheet;
 	if (config->useCustomColor && config->customColor.isValid())
-		button->setStyleSheet(style.buttonAccentStyleSheet(config->customColor));
-	else
-		button->setStyleSheet(QString());
+		sheet = style.buttonAccentStyleSheet(config->customColor);
+	// A label sitting on an active fill takes the same contrasting colour as
+	// the icon beside it.
+	if (activeTint.isValid() && mode != ButtonDisplayMode::IconOnly)
+		sheet += QString("QToolButton:checked { color: %1; }").arg(activeTint.name(QColor::HexRgb));
+	button->setStyleSheet(sheet);
+	button->setProperty("omniBarCheckedText", activeTint);
 }
 
 // ============================================================================
@@ -363,7 +400,13 @@ void OmniBarToolButton::paintLabelAbove()
 	int top = rect().top() + (rect().height() - (textHeight + gap + icon.height())) / 2;
 
 	QRect textRect(rect().left(), top, rect().width(), textHeight);
-	painter.setPen(palette().color(isEnabled() ? QPalette::Active : QPalette::Disabled, QPalette::ButtonText));
+	// The stylesheet's checked text colour never reaches the palette, so an
+	// active button's label colour is carried alongside it.
+	QColor checkedText = property("omniBarCheckedText").value<QColor>();
+	painter.setPen(
+		isChecked() && checkedText.isValid()
+			? checkedText
+			: palette().color(isEnabled() ? QPalette::Active : QPalette::Disabled, QPalette::ButtonText));
 	painter.drawText(textRect, Qt::AlignHCenter | Qt::AlignVCenter,
 			 metrics.elidedText(text(), Qt::ElideRight, textRect.width()));
 
@@ -392,49 +435,32 @@ void OmniBarButton::applyStyle(const BarStyle &style)
 {
 	appliedStyle = style;
 	omniBarApplyButtonAppearance(this, buttonConfig, style);
-	// The appearance pass has just reset the stylesheet, so a button that was
-	// mid-breath needs its current frame putting back.
 	refreshPulse();
+	update();
 }
 
-QString OmniBarButton::restingStyleSheet() const
+void OmniBarButton::setBarArea(Qt::ToolBarArea area)
 {
-	if (buttonConfig && buttonConfig->useCustomColor && buttonConfig->customColor.isValid())
-		return appliedStyle.buttonAccentStyleSheet(buttonConfig->customColor);
-	return QString();
-}
-
-void OmniBarButton::applyPulseFrame()
-{
-	QColor accent = buttonConfig && buttonConfig->useCustomColor && buttonConfig->customColor.isValid()
-				? buttonConfig->customColor
-				: appliedStyle.effectiveButtonChecked();
-
-	QString sheet = appliedStyle.buttonPulseStyleSheet(accent, omniBarPulseFactor(appliedStyle));
-
-	// Most frames land on the same rounded alpha as the one before, so this
-	// keeps the restyling down to the frames that actually look different.
-	if (sheet == pulseSheet)
+	if (barArea == area)
 		return;
-
-	pulseSheet = sheet;
-	setStyleSheet(sheet);
+	barArea = area;
+	update();
 }
 
-void OmniBarButton::refreshPulse()
+bool OmniBarButton::isPulsing() const
 {
 	// Only an action can be active. A group with no action of its own uses
 	// the checked state to show that it is open, which is not something worth
 	// drawing attention to.
-	bool wanted = buttonConfig && buttonConfig->pulseWhenActive && buttonConfig->hasAction() && isChecked() &&
-		      isVisible();
+	return buttonConfig && buttonConfig->pulseWhenActive && buttonConfig->hasAction() && isChecked() && isVisible();
+}
 
-	if (!wanted) {
-		if (pulseTimer)
+void OmniBarButton::refreshPulse()
+{
+	if (!isPulsing()) {
+		if (pulseTimer && pulseTimer->isActive()) {
 			pulseTimer->stop();
-		if (!pulseSheet.isEmpty()) {
-			pulseSheet.clear();
-			setStyleSheet(restingStyleSheet());
+			update();
 		}
 		return;
 	}
@@ -442,10 +468,11 @@ void OmniBarButton::refreshPulse()
 	if (!pulseTimer) {
 		pulseTimer = new QTimer(this);
 		pulseTimer->setInterval(40);
-		connect(pulseTimer, &QTimer::timeout, this, &OmniBarButton::applyPulseFrame);
+		// The breath is painted, so a frame costs a repaint and nothing
+		// more - no stylesheet to rebuild and re-polish.
+		connect(pulseTimer, &QTimer::timeout, this, QOverload<>::of(&QWidget::update));
 	}
 
-	applyPulseFrame();
 	if (!pulseTimer->isActive())
 		pulseTimer->start();
 }
@@ -492,9 +519,24 @@ void OmniBarButton::updateState()
 
 void OmniBarButton::onClicked()
 {
-	if (buttonConfig && buttonConfig->hasAction()) {
-		buttonConfig->action->execute();
+	if (!buttonConfig || !buttonConfig->hasAction())
+		return;
+
+	// Ask first when OBS's own controls would - stopping the stream, say -
+	// or when the button has been set to always ask.
+	if (buttonConfig->needsConfirmation()) {
+		QMessageBox::StandardButton answer =
+			QMessageBox::question(window(), QString::fromUtf8(obs_module_text("OmniBar.Confirm.Title")),
+					      buttonConfig->action->confirmationQuestion(),
+					      QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+		if (answer != QMessageBox::Yes) {
+			// The click has already flipped the checked state; put it back.
+			updateState();
+			return;
+		}
 	}
+
+	buttonConfig->action->execute();
 }
 
 QRect OmniBarButton::indicatorRect() const
@@ -503,18 +545,106 @@ QRect OmniBarButton::indicatorRect() const
 	return QRect(width() - extent - 2, height() - extent - 2, extent, extent);
 }
 
+void OmniBarButton::paintActiveUnderlay(QPainter &painter, const QColor &color)
+{
+	QRectF area = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+	qreal radius = appliedStyle.effectiveCornerRadius(width(), height());
+
+	// The stylesheet leaves an active button's background clear, so whatever
+	// sits under the indicator is put back here: the accent itself for a
+	// fill, the resting background for the others.
+	QColor fill = appliedStyle.indicator == ActiveIndicator::Fill ? color
+								      : appliedStyle.effectiveButtonBackground();
+	if (fill.alpha() == 0)
+		return;
+
+	painter.setPen(Qt::NoPen);
+	painter.setBrush(fill);
+	painter.drawRoundedRect(area, radius, radius);
+}
+
+void OmniBarButton::paintActiveOverlay(QPainter &painter, const QColor &color)
+{
+	qreal radius = appliedStyle.effectiveCornerRadius(width(), height());
+	qreal inset = qMax<qreal>(radius, 6.0);
+	const qreal line = 3.0;
+
+	painter.setPen(Qt::NoPen);
+	painter.setBrush(color);
+
+	switch (appliedStyle.indicator) {
+	case ActiveIndicator::Fill:
+		break;
+	case ActiveIndicator::Underline: {
+		// On the side facing the window's content, the way a tab marks
+		// itself: under a top bar, over a bottom one, beside a side one.
+		QRectF bar;
+		switch (barArea) {
+		case Qt::BottomToolBarArea:
+			bar = QRectF(inset, 0, width() - (inset * 2), line);
+			break;
+		case Qt::LeftToolBarArea:
+			bar = QRectF(width() - line, inset, line, height() - (inset * 2));
+			break;
+		case Qt::RightToolBarArea:
+			bar = QRectF(0, inset, line, height() - (inset * 2));
+			break;
+		default:
+			bar = QRectF(inset, height() - line, width() - (inset * 2), line);
+			break;
+		}
+		painter.drawRoundedRect(bar, line / 2, line / 2);
+		break;
+	}
+	case ActiveIndicator::Dot: {
+		const qreal size = 6.0;
+		qreal offset = qMax<qreal>(4.0, radius * 0.3);
+		painter.drawEllipse(QRectF(width() - offset - size, offset, size, size));
+		break;
+	}
+	case ActiveIndicator::Ring: {
+		QPen pen(color, 1.5);
+		painter.setPen(pen);
+		painter.setBrush(Qt::NoBrush);
+		QRectF area = QRectF(rect()).adjusted(1.25, 1.25, -1.25, -1.25);
+		qreal ringRadius = qMax<qreal>(0.0, radius - 1.0);
+		painter.drawRoundedRect(area, ringRadius, ringRadius);
+		break;
+	}
+	}
+}
+
 void OmniBarButton::paintEvent(QPaintEvent *event)
 {
+	QColor activeColor;
+	if (isChecked() && buttonConfig) {
+		activeColor = buttonConfig->activeColor(appliedStyle);
+		if (isPulsing())
+			activeColor.setAlphaF(activeColor.alphaF() * omniBarPulseFactor(appliedStyle));
+	}
+
+	if (activeColor.isValid()) {
+		QPainter underlay(this);
+		underlay.setRenderHint(QPainter::Antialiasing, true);
+		paintActiveUnderlay(underlay, activeColor);
+	}
+
 	if (buttonConfig && buttonConfig->displayMode == ButtonDisplayMode::TextAbove)
 		paintLabelAbove();
 	else
 		QToolButton::paintEvent(event);
 
-	if (!showIndicator)
+	if (!activeColor.isValid() && !showIndicator)
 		return;
 
 	QPainter painter(this);
 	painter.setRenderHint(QPainter::Antialiasing, true);
+
+	if (activeColor.isValid())
+		paintActiveOverlay(painter, activeColor);
+
+	if (!showIndicator)
+		return;
 
 	QRect rect = indicatorRect();
 	QColor color = palette().color(QPalette::ButtonText);
@@ -587,12 +717,32 @@ OmniBarDisplay::OmniBarDisplay(std::shared_ptr<ButtonConfig> config, QWidget *pa
 {
 	setCheckable(false);
 	setFocusPolicy(Qt::NoFocus);
-	// A number to read, not a control: it must not light up under the mouse
-	// or take a click meant for the OBS window behind it.
-	setAttribute(Qt::WA_TransparentForMouseEvents, true);
 	setToolButtonStyle(Qt::ToolButtonTextOnly);
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+	// Figures of one width, so a timer counting up does not nudge its
+	// neighbours along the bar.
+	QFont tabular = font();
+	tabular.setFeature(QFont::Tag("tnum"), 1);
+	setFont(tabular);
+#endif
+
 	applyStyle(SettingsManager::getStyle());
+}
+
+void OmniBarDisplay::mousePressEvent(QMouseEvent *event)
+{
+	event->ignore();
+}
+
+void OmniBarDisplay::mouseReleaseEvent(QMouseEvent *event)
+{
+	event->ignore();
+}
+
+void OmniBarDisplay::mouseDoubleClickEvent(QMouseEvent *event)
+{
+	event->ignore();
 }
 
 void OmniBarDisplay::applyStyle(const BarStyle &style)
@@ -600,15 +750,36 @@ void OmniBarDisplay::applyStyle(const BarStyle &style)
 	appliedStyle = style;
 	omniBarApplyButtonAppearance(this, displayConfig, style);
 
-	// The shared pass puts a button's accent override on; on a readout that
-	// colour belongs to the text instead, since there is no hover or active
-	// state here for it to land on.
-	if (displayConfig && displayConfig->useCustomColor && displayConfig->customColor.isValid())
-		setStyleSheet(style.displayAccentStyleSheet(displayConfig->customColor));
+	// The shared pass may have put a button's sheet on; a readout has its
+	// own, rebuilt below for whatever colour the value wants.
+	sheetApplied = false;
 
 	// The appearance pass writes the configured label; the reading goes back
 	// over the top of it.
 	updateValue();
+}
+
+QColor OmniBarDisplay::currentTextColor() const
+{
+	auto *display = displayConfig ? dynamic_cast<DisplayAction *>(displayConfig->action.get()) : nullptr;
+	if (!display)
+		return QColor();
+
+	if (display->getWarnColors() && !previewMode) {
+		QColor alert = appliedStyle.severityColor(OmniBarMetrics::severity(display->getMetric()));
+		if (alert.isValid())
+			return alert;
+	}
+
+	if (displayConfig->useCustomColor && displayConfig->customColor.isValid())
+		return displayConfig->customColor;
+
+	BarState state = previewMode ? OmniBarMetrics::previewState(display->getMetric())
+				     : OmniBarMetrics::state(display->getMetric());
+	if (state != BarState::None)
+		return appliedStyle.stateColor(state);
+
+	return QColor();
 }
 
 void OmniBarDisplay::updateValue()
@@ -643,6 +814,15 @@ void OmniBarDisplay::updateValue()
 	int floor = qMax(0, display->getMinimumWidth());
 	if (minimumWidth() != floor)
 		setMinimumWidth(floor);
+
+	// The colour follows thresholds and state, so it can change on any tick;
+	// the sheet is only rebuilt when it does.
+	QColor color = currentTextColor();
+	if (!sheetApplied || color != appliedTextColor) {
+		appliedTextColor = color;
+		sheetApplied = true;
+		setStyleSheet(appliedStyle.displayStyleSheet(color));
+	}
 
 	conditionHolds = displayConfig->showCondition.isSatisfied(displayConfig->action.get());
 	refreshVisibility();
@@ -722,9 +902,10 @@ void OmniBarDivider::paintEvent(QPaintEvent *event)
 // ============================================================================
 
 OmniBarFlyout::OmniBarFlyout(Qt::Orientation orientation, bool grabInput, QWidget *parent)
-	: QWidget(parent, grabInput ? Qt::Popup
-				    : (Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint |
-				       Qt::WindowDoesNotAcceptFocus))
+	// Not stay-on-top: an owned tool window already stays above OBS, and a
+	// group set to open on its own would otherwise float over every other
+	// application - a game, a browser - for as long as its condition holds.
+	: QWidget(parent, grabInput ? Qt::Popup : (Qt::Tool | Qt::FramelessWindowHint | Qt::WindowDoesNotAcceptFocus))
 {
 	setObjectName("OmniBarFlyout");
 	setAttribute(Qt::WA_ShowWithoutActivating);
@@ -819,10 +1000,6 @@ OmniBar::OmniBar(QWidget *parent) : QToolBar(parent)
 	setContextMenuPolicy(Qt::CustomContextMenu);
 	connect(this, &QWidget::customContextMenuRequested, this, &OmniBar::onContextMenuRequested);
 
-	contextMenu = new QMenu(this);
-	QAction *configureAction = contextMenu->addAction(obs_module_text("OmniBar.Settings.Configure"));
-	connect(configureAction, &QAction::triggered, this, &OmniBar::onConfigureClicked);
-
 	// Batched update timer
 	updateTimer = new QTimer(this);
 	updateTimer->setSingleShot(true);
@@ -853,6 +1030,8 @@ OmniBar::OmniBar(QWidget *parent) : QToolBar(parent)
 OmniBar::~OmniBar()
 {
 	obs_frontend_remove_event_callback(onFrontendEvent, this);
+	if (mainWindow)
+		mainWindow->removeEventFilter(this);
 	clearButtons();
 	instance = nullptr;
 }
@@ -863,7 +1042,68 @@ void OmniBar::attachToMainWindow(QMainWindow *window)
 		return;
 
 	mainWindow = window;
+	mainWindow->installEventFilter(this);
 	repositionToolbar();
+}
+
+void OmniBar::moveTo(DockPosition position)
+{
+	if (SettingsManager::getDockPosition() == position)
+		return;
+
+	// Changes the position for good, exactly as the settings dialog does, so
+	// the bar comes back where it was left after a restart.
+	SettingsManager::setDockPosition(position);
+	SettingsManager::save();
+
+	if (instance)
+		instance->repositionToolbar();
+
+	// An open settings dialog would otherwise still be showing - and on OK,
+	// write back - the position the bar has just been moved away from.
+	OmniBarConfig::dockPositionChanged(position);
+}
+
+bool OmniBar::eventFilter(QObject *watched, QEvent *event)
+{
+	if (watched == mainWindow) {
+		switch (event->type()) {
+		case QEvent::Move:
+		case QEvent::Resize:
+			repositionFlyouts();
+			break;
+		case QEvent::WindowStateChange:
+		case QEvent::Hide:
+		case QEvent::Show:
+			// Minimising takes the flyouts down with the window; the
+			// next update decides whether they come back.
+			scheduleUpdate();
+			break;
+		default:
+			break;
+		}
+	}
+	return QToolBar::eventFilter(watched, event);
+}
+
+void OmniBar::moveEvent(QMoveEvent *event)
+{
+	QToolBar::moveEvent(event);
+	repositionFlyouts();
+}
+
+void OmniBar::resizeEvent(QResizeEvent *event)
+{
+	QToolBar::resizeEvent(event);
+	repositionFlyouts();
+}
+
+void OmniBar::repositionFlyouts()
+{
+	for (auto &group : groups) {
+		if (group->flyout && group->flyout->isVisible() && group->parentButton)
+			group->flyout->showNear(group->parentButton, currentArea());
+	}
 }
 
 Qt::ToolBarArea OmniBar::currentArea() const
@@ -932,6 +1172,11 @@ void OmniBar::repositionToolbar()
 	} else {
 		setOrientation(Qt::Horizontal);
 	}
+
+	// A move between opposite edges keeps the orientation, and so the
+	// buttons, but turns the side an underline belongs on.
+	for (auto *button : buttons)
+		button->setBarArea(area);
 }
 
 void OmniBar::rebuildToolbar()
@@ -943,6 +1188,7 @@ void OmniBar::rebuildToolbar()
 	clearButtons();
 	createButtonsFromConfig();
 	isRebuilding = false;
+	rebuildCount++;
 }
 
 void OmniBar::clearButtons()
@@ -989,6 +1235,8 @@ void OmniBar::clearButtons()
 OmniBarButton *OmniBar::createButton(const std::shared_ptr<ButtonConfig> &config)
 {
 	auto *button = new OmniBarButton(config, this);
+	button->setBarArea(currentArea());
+	tagEntry(button, config);
 	button->applyStyle(SettingsManager::getStyle());
 	button->updateState();
 	connect(button, &QToolButton::clicked, this, &OmniBar::scheduleUpdate);
@@ -1008,9 +1256,22 @@ void OmniBar::createButtonsFromConfig()
 		if (config->isSpacer()) {
 			auto *spacerAction = dynamic_cast<SpacerAction *>(config->action.get());
 			int spacerSize = spacerAction ? spacerAction->getWidth() : 10;
+			bool expanding = spacerAction && spacerAction->isExpanding();
 
 			QWidget *spacer = new QWidget(this);
-			if (orientation() == Qt::Horizontal) {
+			tagEntry(spacer, config);
+			bool horizontal = orientation() == Qt::Horizontal;
+			if (expanding) {
+				// Takes whatever the bar has left, so what follows sits
+				// at the far end; the size is only a floor.
+				if (horizontal) {
+					spacer->setMinimumWidth(spacerSize);
+					spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+				} else {
+					spacer->setMinimumHeight(spacerSize);
+					spacer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+				}
+			} else if (horizontal) {
 				spacer->setFixedWidth(spacerSize);
 			} else {
 				spacer->setFixedHeight(spacerSize);
@@ -1023,6 +1284,7 @@ void OmniBar::createButtonsFromConfig()
 
 		if (config->isDivider()) {
 			auto *divider = new OmniBarDivider(config, orientation(), SettingsManager::getStyle(), this);
+			tagEntry(divider, config);
 			QAction *dividerEntry = addWidget(divider);
 			barActions.append(dividerEntry);
 			decorations.append({config, dividerEntry});
@@ -1031,6 +1293,7 @@ void OmniBar::createButtonsFromConfig()
 
 		if (config->isDisplay()) {
 			auto *display = new OmniBarDisplay(config, this);
+			tagEntry(display, config);
 			QAction *displayEntry = addWidget(display);
 			barActions.append(displayEntry);
 			// A readout keeps its own entry rather than joining the
@@ -1120,7 +1383,7 @@ void OmniBar::connectGroupTriggers(GroupRuntime *group)
 			// the parent, so ignore the reopen that would follow.
 			if (!g->expanded && g->flyoutClosedAt.isValid() && g->flyoutClosedAt.elapsed() < 150)
 				return;
-			if (!g->expanded && !groupConditionHolds(g))
+			if (!g->expanded && (!groupConditionHolds(g) || !groupAnchorUsable(g)))
 				return;
 			setGroupExpanded(g, !g->expanded);
 		});
@@ -1176,10 +1439,32 @@ bool OmniBar::groupConditionHolds(GroupRuntime *group) const
 	return condition.isSatisfied(group->config->action.get());
 }
 
+bool OmniBar::groupAnchorUsable(GroupRuntime *group) const
+{
+	if (!group || !group->parentButton)
+		return false;
+
+	// The group's own button off the bar - its show condition, a missing
+	// target - leaves nothing for the children to belong to.
+	if (group->parentButton->isHidden())
+		return false;
+
+	if (group->config->groupDisplay == GroupDisplayMode::Inline)
+		return true;
+
+	// A flyout hangs off the window: nowhere to put it while the bar is off
+	// the window or the window is minimised.
+	if (!isVisible() || !mainWindow || mainWindow->isMinimized() || !mainWindow->isVisible())
+		return false;
+	return true;
+}
+
 void OmniBar::setGroupExpanded(GroupRuntime *group, bool expanded)
 {
 	if (!group || !group->parentButton)
 		return;
+	if (expanded && !groupAnchorUsable(group))
+		expanded = false;
 	if (group->expanded == expanded)
 		return;
 
@@ -1236,10 +1521,12 @@ void OmniBar::updateButtonStates()
 		const auto &config = group->config;
 		bool holds = groupConditionHolds(group.get());
 
+		bool anchored = groupAnchorUsable(group.get());
+
 		if (config->groupExpand == GroupExpandMode::WhenActive) {
 			// Here the condition is the trigger.
-			setGroupExpanded(group.get(), holds);
-		} else if (!holds) {
+			setGroupExpanded(group.get(), holds && anchored);
+		} else if (!holds || !anchored) {
 			// Click and hover open the group themselves; the condition
 			// only decides whether they are allowed to.
 			setGroupExpanded(group.get(), false);
@@ -1281,13 +1568,82 @@ void OmniBar::onPollTimer()
 
 void OmniBar::refreshFromConfiguration()
 {
+	// Turning the bar between horizontal and vertical rebuilds it already,
+	// so only rebuild here if the move did not.
+	int before = rebuildCount;
 	repositionToolbar();
-	rebuildToolbar();
+	if (rebuildCount == before)
+		rebuildToolbar();
+}
+
+void OmniBar::tagEntry(QWidget *widget, const std::shared_ptr<ButtonConfig> &config)
+{
+	if (widget && config)
+		widget->setProperty(kOmniBarEntryIdProperty, config->id);
+}
+
+std::shared_ptr<ButtonConfig> OmniBar::entryAt(const QPoint &pos) const
+{
+	QString id;
+	for (QWidget *widget = childAt(pos); widget && widget != this; widget = widget->parentWidget()) {
+		id = widget->property(kOmniBarEntryIdProperty).toString();
+		if (!id.isEmpty())
+			break;
+	}
+	if (id.isEmpty())
+		return nullptr;
+
+	// Children of an inline group sit on the bar too.
+	for (const auto &config : activeConfigs) {
+		if (!config)
+			continue;
+		if (config->id == id)
+			return config;
+		for (const auto &child : config->children) {
+			if (child && child->id == id)
+				return child;
+		}
+	}
+	return nullptr;
 }
 
 void OmniBar::onContextMenuRequested(const QPoint &pos)
 {
-	contextMenu->exec(mapToGlobal(pos));
+	// Built fresh each time, so it can speak about whatever was clicked.
+	QMenu menu(this);
+
+	if (auto entry = entryAt(pos)) {
+		QString editText =
+			QString::fromUtf8(obs_module_text("OmniBar.Menu.EditEntry")).arg(entry->displayText());
+		QString id = entry->id;
+		// Queued, so the editor does not open inside the menu's own loop.
+		connect(menu.addAction(editText), &QAction::triggered, this,
+			[id]() { QTimer::singleShot(0, [id]() { OmniBarConfig::showDialog(id); }); });
+		menu.addSeparator();
+	}
+
+	QMenu *dock = menu.addMenu(QString::fromUtf8(obs_module_text("OmniBar.Menu.Dock")));
+	const std::pair<DockPosition, const char *> positions[] = {{DockPosition::Top, "OmniBar.Position.Top"},
+								   {DockPosition::Left, "OmniBar.Position.Left"},
+								   {DockPosition::Bottom, "OmniBar.Position.Bottom"},
+								   {DockPosition::Right, "OmniBar.Position.Right"},
+								   {DockPosition::None, "OmniBar.Position.None"}};
+	for (const auto &position : positions) {
+		QAction *action = dock->addAction(QString::fromUtf8(obs_module_text(position.second)));
+		action->setCheckable(true);
+		action->setChecked(SettingsManager::getDockPosition() == position.first);
+		DockPosition target = position.first;
+		// Queued, so the bar is not taken off the window while its own
+		// menu is still unwinding.
+		connect(action, &QAction::triggered, this,
+			[target]() { QTimer::singleShot(0, [target]() { OmniBar::moveTo(target); }); });
+	}
+
+	menu.addSeparator();
+	connect(menu.addAction(QString::fromUtf8(obs_module_text("OmniBar.Settings.Configure"))), &QAction::triggered,
+		this, &OmniBar::onConfigureClicked);
+
+	menu.exec(mapToGlobal(pos));
 }
 
 void OmniBar::onConfigureClicked()

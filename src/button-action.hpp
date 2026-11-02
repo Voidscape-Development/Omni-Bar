@@ -60,6 +60,11 @@ enum class FrontendActionType {
 // the configuration file, so existing ones must keep their values.
 enum class ButtonDisplayMode { IconOnly = 0, TextOnly = 1, TextRight = 2, TextBelow = 3, TextLeft = 4, TextAbove = 5 };
 
+// Whether a button asks before it runs. FollowObs asks exactly when OBS's own
+// controls would - stopping the stream, for instance, if "confirm before
+// stopping" is on in the OBS settings. Stored as numbers.
+enum class ConfirmMode { FollowObs = 0, Always = 1, Never = 2 };
+
 // How a group presents its children.
 enum class GroupDisplayMode { Flyout = 0, Inline = 1 };
 
@@ -112,6 +117,16 @@ public:
 	virtual QString getDisplayName() const = 0;
 	virtual obs_data_t *serialize() const = 0;
 	static std::unique_ptr<ButtonAction> deserialize(obs_data_t *data);
+
+	// What this action reports on, which picks the colour it lights up in.
+	virtual BarState barState() const { return BarState::None; }
+
+	// True when OBS's own controls would ask before doing what this is about
+	// to do, given what is running right now.
+	virtual bool obsWouldConfirm() const { return false; }
+
+	// Question put to the user before running, when one is asked.
+	virtual QString confirmationQuestion() const;
 };
 
 // Placeholder for a button that does nothing on its own, used by groups that
@@ -133,6 +148,9 @@ public:
 	bool isActive() const override;
 	QString getDisplayName() const override;
 	obs_data_t *serialize() const override;
+	BarState barState() const override;
+	bool obsWouldConfirm() const override;
+	QString confirmationQuestion() const override;
 
 	FrontendActionType getActionType() const { return actionType; }
 	void setActionType(FrontendActionType type) { actionType = type; }
@@ -223,7 +241,7 @@ private:
 
 class SpacerAction : public ButtonAction {
 public:
-	SpacerAction(int width = 10);
+	SpacerAction(int width = 10, bool expanding = false);
 
 	ActionType getType() const override { return ActionType::Spacer; }
 	void execute() override {}
@@ -233,8 +251,14 @@ public:
 	int getWidth() const { return spacerWidth; }
 	void setWidth(int w) { spacerWidth = w; }
 
+	// A flexible space takes whatever length the bar has left over, pushing
+	// everything after it to the far end. Its width is then only a minimum.
+	bool isExpanding() const { return expanding; }
+	void setExpanding(bool value) { expanding = value; }
+
 private:
 	int spacerWidth;
+	bool expanding;
 };
 
 // A line drawn across the bar to visually separate neighbouring buttons.
@@ -304,6 +328,11 @@ public:
 	int getMinimumWidth() const { return minimumWidth; }
 	void setMinimumWidth(int value) { minimumWidth = value; }
 
+	// Draw the value in the bar's warning or critical colour once it crosses
+	// its threshold. Only means anything for metrics that have one.
+	bool getWarnColors() const { return warnColors; }
+	void setWarnColors(bool value) { warnColors = value; }
+
 	// Reading as it stands right now, formatted for the bar.
 	QString currentValue() const;
 
@@ -311,6 +340,7 @@ private:
 	DisplayMetric metric;
 	int minimumWidth;
 	ClockFormat clockFormat = ClockFormat::Hours24;
+	bool warnColors = true;
 };
 
 // Button configuration class
@@ -343,6 +373,9 @@ public:
 	// speed and depth of the breath are part of the bar's style.
 	bool pulseWhenActive = false;
 
+	// Whether pressing the button asks first.
+	ConfirmMode confirmMode = ConfirmMode::FollowObs;
+
 	// Group settings. Children are limited to one level deep: a child is
 	// never itself a group.
 	bool isGroup = false;
@@ -369,6 +402,17 @@ public:
 	// True when the button runs something of its own, as opposed to a group
 	// that only opens and closes.
 	bool hasAction() const;
+
+	// True when pressing the button right now should ask before running.
+	bool needsConfirmation() const;
+
+	// The colour the button lights up in while active: its own override, or
+	// the style's colour for what its action reports on.
+	QColor activeColor(const BarStyle &style) const;
+
+	// True when the button points at a source, filter or hotkey that cannot
+	// currently be found.
+	bool targetMissing() const;
 
 	// Text shown for this button in the settings tree.
 	QString displayText() const;

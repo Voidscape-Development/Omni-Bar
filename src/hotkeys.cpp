@@ -18,7 +18,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "hotkeys.hpp"
 #include "omni-bar.hpp"
-#include "omni-bar-config.hpp"
 #include "settings-manager.hpp"
 
 #include <obs-module.h>
@@ -63,20 +62,7 @@ void applyPosition(std::optional<DockPosition> target)
 	else
 		position = DockPosition::None;
 
-	if (SettingsManager::getDockPosition() == position)
-		return;
-
-	// A hotkey changes the position for good, exactly as the settings dialog
-	// does, so the bar comes back where it was left after a restart.
-	SettingsManager::setDockPosition(position);
-	SettingsManager::save();
-
-	if (OmniBar *bar = OmniBar::getInstance())
-		bar->repositionToolbar();
-
-	// An open settings dialog would otherwise still be showing - and on OK,
-	// write back - the position the bar has just been moved away from.
-	OmniBarConfig::dockPositionChanged(position);
+	OmniBar::moveTo(position);
 }
 
 void onPositionHotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
