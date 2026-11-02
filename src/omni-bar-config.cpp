@@ -426,7 +426,7 @@ ActionPicker::ActionPicker(QWidget *parent) : QWidget(parent, Qt::Popup)
 
 	QColor ink = palette().color(QPalette::Text);
 	QColor quiet = ink;
-	quiet.setAlphaF(0.6);
+	quiet.setAlphaF(0.6f);
 	QHash<QString, QTreeWidgetItem *> categories;
 
 	for (const auto &choice : kActionChoices) {

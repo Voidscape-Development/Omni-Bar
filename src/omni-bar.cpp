@@ -591,7 +591,8 @@ void OmniBarButton::paintEvent(QPaintEvent *event)
 	if (isChecked() && buttonConfig) {
 		activeColor = buttonConfig->activeColor(appliedStyle);
 		if (isPulsing())
-			activeColor.setAlphaF(activeColor.alphaF() * omniBarPulseFactor(appliedStyle));
+			activeColor.setAlphaF(
+				static_cast<float>(activeColor.alphaF() * omniBarPulseFactor(appliedStyle)));
 	}
 
 	if (activeColor.isValid()) {
