@@ -1,0 +1,18 @@
+{
+    "display_name": "Omni Bar",
+    "id": "30057845-9394-4eb3-b201-dd210c08281a",
+    "version": "1.0.0",
+    "authors": [
+        "Eion"
+    ],
+    "name": "Omni-Bar",
+    "description": "A configurable toolbar for OBS Studio.",
+    "long_description": "A configurable toolbar for OBS Studio. It docks to any edge of the main window and holds buttons that drive OBS or your sources — streaming, recording, replay buffer, virtual camera, studio mode, source visibility, filters and source hotkeys — alongside live readouts of what OBS is doing, with the bar and everything on it styled to taste.",
+    "urls": {
+        "repository": "https://github.com/Voidscape-Development/Omni-Bar",
+        "website": "https://github.com/Voidscape-Development/Omni-Bar",
+        "support": "https://github.com/Voidscape-Development/Omni-Bar/issues"
+    },
+    "has_banner": false,
+    "has_icon": false
+}

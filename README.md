@@ -151,11 +151,12 @@ settings dialog does, so the bar comes back where you left it after a restart.
 Download the package for your platform from the
 [Releases](https://github.com/Voidscape-Development/Omni-Bar/releases) page.
 
-- **Windows** — run the installer, or use the portable `.zip` if you run OBS portable
+- **Windows** — run the installer, or extract the `.zip` into `C:\ProgramData\obs-studio\plugins\` (or the
+  `plugins` folder of a portable OBS)
 - **macOS** — open the `.pkg`
 - **Linux** — install the `.deb`, or extract the `.tar.xz` into your OBS plugin directory
 
-Requires OBS Studio 31.1.1 or newer.
+Requires OBS Studio 33 or newer.
 
 ## Usage
 
@@ -196,9 +197,9 @@ The project uses the standard OBS plugin build system and CMake presets.
 
 | Platform | Requirements |
 | --- | --- |
-| Windows | Visual Studio 17 2022, CMake 3.30.5 |
-| macOS | Xcode 16.0, CMake 3.30.5 |
-| Ubuntu 24.04 | CMake 3.28.3, `ninja-build`, `pkg-config`, `build-essential` |
+| Windows | Visual Studio 18 2026, CMake 3.30.5 |
+| macOS | Xcode 26.5, CMake 3.30.5 |
+| Ubuntu 26.04 | CMake 3.28.3, `ninja-build`, `pkg-config`, `build-essential` |
 
 ```sh
 cmake --preset windows-x64      # or macos, or ubuntu-x86_64
