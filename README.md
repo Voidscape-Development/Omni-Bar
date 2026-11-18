@@ -151,7 +151,8 @@ settings dialog does, so the bar comes back where you left it after a restart.
 Download the package for your platform from the
 [Releases](https://github.com/Voidscape-Development/Omni-Bar/releases) page.
 
-- **Windows** — run the installer, or use the portable `.zip` if you run OBS portable
+- **Windows** — run the installer, or use the `.zip`. For OBS 32 and earlier use the `-legacy` zip, or the
+  `-portable-legacy` zip if you run OBS portable
 - **macOS** — open the `.pkg`
 - **Linux** — install the `.deb`, or extract the `.tar.xz` into your OBS plugin directory
 
